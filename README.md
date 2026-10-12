@@ -55,6 +55,6 @@ Edit `YamahaRemote.json`:
 - `Mica` — enable the Windows 11 Mica background.
 - `FavoriteInputs` — buttons shown directly in the remote. `Label` is the displayed name and `Input` is the Yamaha input ID.
 
-To find the current input ID, use `YamahaStatus.ps1` from https://github.com/cnieuweboer/Yamaha-Power-Helper
+To read the input ID of the currently selected input, use `YamahaStatus.ps1` from https://github.com/cnieuweboer/Yamaha-Power-Helper
 
 The input dropdown is populated automatically from the Yamaha device.
