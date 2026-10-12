@@ -9,18 +9,11 @@ Designed as a simple desktop remote for common controls such as power, mute, vol
 - Windows
 - Python 3
 - PySide6
-- win32mica (optional, for Windows 11 Mica support)
 
 Install PySide6 with:
 
 ```powershell
 py -m pip install PySide6
-```
-
-If Mica is enabled:
-
-```powershell
-py -m pip install win32mica
 ```
 
 ## Usage
@@ -64,3 +57,6 @@ Edit `YamahaRemote.json`:
 To read the input ID of the currently selected input, use `YamahaStatus.ps1` from [Yamaha-Power-Helper](https://github.com/cnieuweboer/Yamaha-Power-Helper).
 
 The input dropdown is populated automatically from the Yamaha device.
+
+
+A small subset of the win32mica is included in the script to enable mica support.
