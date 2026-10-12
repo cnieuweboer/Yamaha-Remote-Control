@@ -1,9 +1,14 @@
 import ctypes
+import ipaddress
 import json
 import sys
+import time
 from pathlib import Path
+from urllib.error import URLError
+from urllib.parse import quote
+from urllib.request import urlopen
 
-from PySide6.QtCore import QFileInfo, QTimer, Qt
+from PySide6.QtCore import QFileInfo, QObject, QRunnable, QThreadPool, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QIcon, QPalette
 from PySide6.QtWidgets import (
     QApplication,
@@ -15,12 +20,15 @@ from PySide6.QtWidgets import (
     QPushButton,
     QWidget,
 )
-from urllib.parse import quote
-from urllib.request import urlopen
 
-try:
-    from win32mica import ApplyMica, MicaTheme, MicaStyle
-except ImportError:
+if sys.platform == "win32":
+    try:
+        from win32mica import ApplyMica, MicaTheme, MicaStyle
+    except ImportError:
+        ApplyMica = None
+        MicaTheme = None
+        MicaStyle = None
+else:
     ApplyMica = None
     MicaTheme = None
     MicaStyle = None
@@ -30,54 +38,221 @@ except ImportError:
 # Config
 # ----------------------------
 
-CONFIG_FILE = "YamahaRemote.json"
+CONFIG_FILES = (
+    "YamahaRemote.json",
+    "ReceiverRemote.json",
+)
+
+
+class ConfigError(ValueError):
+    pass
+
+
+def _require_bool(config, key, default):
+    value = config.get(key, default)
+
+    if not isinstance(value, bool):
+        raise ConfigError(
+            f'"{key}" must be true or false.'
+        )
+
+    return value
+
+
+def _validate_host(value):
+    if not isinstance(value, str):
+        raise ConfigError(
+            '"Host" must be a string.'
+        )
+
+    host = value.strip()
+
+    if not host:
+        raise ConfigError(
+            '"Host" must not be empty.'
+        )
+
+    try:
+        ipaddress.ip_address(host)
+        return host
+    except ValueError:
+        pass
+
+    if len(host) > 253:
+        raise ConfigError(
+            '"Host" is too long.'
+        )
+
+    labels = host.rstrip(".").split(".")
+    hostname_label = re.compile(
+        r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$"
+    )
+
+    if not labels or any(
+        not hostname_label.fullmatch(label)
+        for label in labels
+    ):
+        raise ConfigError(
+            '"Host" must be a valid IP address or hostname.'
+        )
+
+    return host
+
+
+def _validate_favorites(value):
+    if not isinstance(value, list):
+        raise ConfigError(
+            '"FavoriteInputs" must be a list.'
+        )
+
+    normalized = []
+
+    for index, item in enumerate(value, start=1):
+        if not isinstance(item, dict):
+            raise ConfigError(
+                f'"FavoriteInputs" item {index} must be an object.'
+            )
+
+        unknown_keys = set(item) - {
+            "Label",
+            "Input",
+        }
+
+        if unknown_keys:
+            names = ", ".join(sorted(unknown_keys))
+            raise ConfigError(
+                f'"FavoriteInputs" item {index} has unknown '
+                f'field(s): {names}.'
+            )
+
+        label = item.get("Label")
+        input_id = item.get("Input")
+
+        if not isinstance(label, str) or not label.strip():
+            raise ConfigError(
+                f'"FavoriteInputs" item {index} must have a '
+                'non-empty string "Label".'
+            )
+
+        if not isinstance(input_id, str) or not input_id.strip():
+            raise ConfigError(
+                f'"FavoriteInputs" item {index} must have a '
+                'non-empty string "Input".'
+            )
+
+        normalized.append(
+            {
+                "Label": label.strip(),
+                "Input": input_id.strip(),
+            }
+        )
+
+    return normalized
+
+
+def validate_config(raw_config):
+    if not isinstance(raw_config, dict):
+        raise ConfigError(
+            "The configuration root must be a JSON object."
+        )
+
+    config = dict(raw_config)
+
+    # Backward compatibility with the earlier Yamaha-only config.
+    if "Host" not in config and "YamahaIP" in config:
+        config["Host"] = config["YamahaIP"]
+
+    # Accept an old multi-backend Yamaha config, but reject other brands.
+    if "Backend" in config:
+        backend = config["Backend"]
+
+        if not isinstance(backend, str):
+            raise ConfigError(
+                '"Backend" must be a string.'
+            )
+
+        if backend.strip().lower() != "yamaha":
+            raise ConfigError(
+                'This version only supports Yamaha. '
+                '"Backend" must be "yamaha".'
+            )
+
+    config["Host"] = _validate_host(
+        config.get("Host")
+    )
+    config["DarkMode"] = _require_bool(
+        config,
+        "DarkMode",
+        True,
+    )
+    config["Mica"] = _require_bool(
+        config,
+        "Mica",
+        False,
+    )
+    config["FavoriteInputs"] = _validate_favorites(
+        config.get("FavoriteInputs", [])
+    )
+
+    allowed_keys = {
+        "Backend",
+        "Host",
+        "YamahaIP",
+        "DarkMode",
+        "Mica",
+        "FavoriteInputs",
+    }
+
+    unknown = set(config) - allowed_keys
+
+    if unknown:
+        names = ", ".join(sorted(unknown))
+        raise ConfigError(
+            "Unknown configuration setting(s): "
+            f"{names}."
+        )
+
+    return config
 
 
 def load_config():
-    config_path = Path(__file__).resolve().with_name(CONFIG_FILE)
+    script_path = Path(__file__).resolve()
 
-    if not config_path.exists():
-        raise FileNotFoundError(
-            f"{CONFIG_FILE} was not found next to {Path(__file__).name}."
+    config_path = None
+    for filename in CONFIG_FILES:
+        candidate = script_path.with_name(filename)
+        if candidate.exists():
+            config_path = candidate
+            break
+
+    if config_path is None:
+        raise ConfigError(
+            "YamahaRemote.json was not found next to "
+            f"{script_path.name}."
         )
 
-    with config_path.open("r", encoding="utf-8") as f:
-        config = json.load(f)
+    try:
+        with config_path.open(
+            "r",
+            encoding="utf-8",
+        ) as f:
+            raw_config = json.load(f)
+    except json.JSONDecodeError as ex:
+        raise ConfigError(
+            "Invalid JSON syntax in "
+            f"{config_path.name}: line {ex.lineno}, "
+            f"column {ex.colno}: {ex.msg}"
+        ) from ex
+    except OSError as ex:
+        raise ConfigError(
+            f"Unable to read {config_path.name}: {ex}"
+        ) from ex
 
-    yamaha_ip = str(config.get("YamahaIP", "")).strip()
-    if not yamaha_ip:
-        raise ValueError("YamahaIP must be set in YamahaRemote.json.")
-
-    dark_mode = bool(config.get("DarkMode", True))
-    mica = bool(config.get("Mica", False))
-
-    favorites = config.get("FavoriteInputs", [])
-    if not isinstance(favorites, list):
-        raise ValueError("FavoriteInputs must be a list.")
-
-    normalized_favorites = []
-    for favorite in favorites:
-        if not isinstance(favorite, dict):
-            continue
-
-        label = str(favorite.get("Label", "")).strip()
-        input_id = str(favorite.get("Input", "")).strip()
-
-        if label and input_id:
-            normalized_favorites.append(
-                {"Label": label, "Input": input_id}
-            )
-
-    return {
-        "YamahaIP": yamaha_ip,
-        "DarkMode": dark_mode,
-        "Mica": mica,
-        "FavoriteInputs": normalized_favorites,
-    }
+    return validate_config(raw_config)
 
 
 # ----------------------------
-# Windows integration
+# Platform integration
 # ----------------------------
 
 def set_app_user_model_id(app_id):
@@ -116,7 +291,7 @@ def set_dark_titlebar(hwnd):
         pass
 
 
-def get_windows_app_icon():
+def get_app_icon():
     if sys.platform != "win32":
         return QIcon()
 
@@ -136,56 +311,127 @@ def get_windows_app_icon():
 
 
 # ----------------------------
-# Yamaha API
+# Receiver backends
 # ----------------------------
 
-class YamahaClient:
-    def __init__(self, ip):
-        self.base_url = f"http://{ip}/YamahaExtendedControl/v1"
+class ReceiverConnectionError(RuntimeError):
+    """Raised when the receiver cannot be reached."""
 
-    def _get_json(self, path):
-        with urlopen(f"{self.base_url}/{path}", timeout=2) as response:
-            data = json.loads(response.read().decode("utf-8"))
+
+class ReceiverBackend:
+    display_name = "Receiver"
+
+    def get_status(self, timeout=2):
+        raise NotImplementedError
+
+    def get_inputs(self):
+        raise NotImplementedError
+
+    def set_power(self, on):
+        raise NotImplementedError
+
+    def set_mute(self, enabled):
+        raise NotImplementedError
+
+    def volume_up(self):
+        raise NotImplementedError
+
+    def volume_down(self):
+        raise NotImplementedError
+
+    def set_input(self, input_id):
+        raise NotImplementedError
+
+    def format_volume(self, volume):
+        if volume is None:
+            return "-"
+        return str(volume)
+
+    def preview_volume(self, volume, direction):
+        return volume
+
+    def wait_until_powered_on(self, timeout=5):
+        deadline = time.monotonic() + timeout
+
+        while time.monotonic() < deadline:
+            remaining = deadline - time.monotonic()
+
+            try:
+                status = self.get_status(
+                    timeout=max(0.1, min(0.5, remaining))
+                )
+                if status.get("power") == "on":
+                    return True
+            except ReceiverConnectionError:
+                pass
+
+            time.sleep(0.1)
+
+        return False
+
+class YamahaBackend(ReceiverBackend):
+    display_name = "Yamaha"
+
+    def __init__(self, host, config=None):
+        self.host = host
+        self.config = config or {}
+        self.base_url = (
+            f"http://{host}/YamahaExtendedControl/v1"
+        )
+
+    def _get_json(self, path, timeout=2):
+        try:
+            with urlopen(
+                f"{self.base_url}/{path}",
+                timeout=timeout,
+            ) as response:
+                data = json.loads(
+                    response.read().decode("utf-8")
+                )
+        except (URLError, TimeoutError, OSError) as ex:
+            raise ReceiverConnectionError(
+                "Unable to reach the Yamaha."
+            ) from ex
 
         response_code = data.get("response_code")
-        if response_code is not None and response_code != 0:
+        if (
+            response_code is not None
+            and response_code != 0
+        ):
             raise RuntimeError(
-                f"Yamaha returned response code {response_code}."
+                "Yamaha returned response code "
+                f"{response_code}."
             )
 
         return data
 
-    def get_status(self):
-        return self._get_json("main/getStatus")
+    def get_status(self, timeout=2):
+        return self._get_json(
+            "main/getStatus",
+            timeout=timeout,
+        )
 
     def set_power(self, on):
         state = "on" if on else "standby"
-        self._get_json(f"main/setPower?power={state}")
+        self._get_json(
+            f"main/setPower?power={state}"
+        )
 
     def set_mute(self, enabled):
         value = "true" if enabled else "false"
-        self._get_json(f"main/setMute?enable={value}")
+        self._get_json(
+            f"main/setMute?enable={value}"
+        )
 
     def volume_up(self):
-        self._get_json("main/setVolume?volume=up")
+        self._get_json(
+            "main/setVolume?volume=up"
+        )
 
     def volume_down(self):
-        self._get_json("main/setVolume?volume=down")
-
-    def wait_until_powered_on(self):
-        import time
-
-        for _ in range(30):
-            time.sleep(0.1)
-
-            try:
-                status = self.get_status()
-                if status.get("power") == "on":
-                    return True
-            except Exception:
-                pass
-
-        return False
+        self._get_json(
+            "main/setVolume?volume=down"
+        )
 
     def set_input(self, input_id):
         status = self.get_status()
@@ -194,25 +440,37 @@ class YamahaClient:
             self.set_power(True)
 
             if not self.wait_until_powered_on():
-                raise RuntimeError(
-                    "The Yamaha did not finish powering on."
+                raise ReceiverConnectionError(
+                    "The Yamaha did not finish "
+                    "powering on."
                 )
 
         self._get_json(
-            f"main/setInput?input={quote(input_id, safe='')}"
+            "main/setInput?input="
+            + quote(input_id, safe="")
         )
 
     def get_inputs(self):
-        features = self._get_json("system/getFeatures")
+        features = self._get_json(
+            "system/getFeatures"
+        )
 
         names = {}
 
         try:
-            name_text = self._get_json("system/getNameText")
+            name_text = self._get_json(
+                "system/getNameText"
+            )
 
-            for item in name_text.get("input_list", []):
-                input_id = str(item.get("id", "")).strip()
-                text = str(item.get("text", "")).strip()
+            for item in name_text.get(
+                "input_list", []
+            ):
+                input_id = str(
+                    item.get("id", "")
+                ).strip()
+                text = str(
+                    item.get("text", "")
+                ).strip()
 
                 if input_id and text:
                     names[input_id] = text
@@ -221,21 +479,67 @@ class YamahaClient:
 
         inputs = []
 
-        for item in features.get("system", {}).get("input_list", []):
-            input_id = str(item.get("id", "")).strip()
+        for item in features.get(
+            "system", {}
+        ).get("input_list", []):
+            input_id = str(
+                item.get("id", "")
+            ).strip()
+
             if not input_id:
                 continue
 
             label = names.get(input_id)
+
             if not label:
-                label = input_id.replace("_", " ").title()
+                label = (
+                    input_id
+                    .replace("_", " ")
+                    .title()
+                )
 
             inputs.append(
-                {"Id": input_id, "Label": label}
+                {
+                    "Id": input_id,
+                    "Label": label,
+                }
             )
 
-        inputs.sort(key=lambda x: x["Label"].lower())
+        inputs.sort(
+            key=lambda x: x["Label"].lower()
+        )
         return inputs
+
+    def preview_volume(self, volume, direction):
+        try:
+            return int(volume) + direction
+        except (TypeError, ValueError):
+            return volume
+
+def create_backend(config):
+    return YamahaBackend(config["Host"], config)
+
+
+# ----------------------------
+# Background work
+# ----------------------------
+
+class WorkerSignals(QObject):
+    completed = Signal(object, object)
+
+
+class Worker(QRunnable):
+    def __init__(self, function):
+        super().__init__()
+        self.function = function
+        self.signals = WorkerSignals()
+
+    def run(self):
+        try:
+            result = self.function()
+            self.signals.completed.emit(result, None)
+        except Exception as ex:
+            self.signals.completed.emit(None, ex)
 
 
 # ----------------------------
@@ -247,27 +551,47 @@ class YamahaRemote(QWidget):
         super().__init__()
 
         self.dark_mode = config["DarkMode"]
-        self.mica_enabled = config["Mica"]
-        self.yamaha = YamahaClient(config["YamahaIP"])
+        self.mica_enabled = bool(
+            config["Mica"]
+            and sys.platform == "win32"
+            and ApplyMica is not None
+        )
+        self.backend = create_backend(config)
         self.favorite_inputs = config["FavoriteInputs"]
 
         self.last_status = None
         self.inputs = []
+        self.connected = False
         self.refresh_running = False
+        self.action_running = False
+        self.initialized_inputs = False
+        self.closing = False
+
+        # Keep receiver communication serialized. Embedded receiver APIs often
+        # expect one request stream at a time, and retaining the workers also
+        # avoids PySide lifetime races.
+        self.thread_pool = QThreadPool(self)
+        self.thread_pool.setMaxThreadCount(1)
+        self.active_workers = set()
+
+        self.control_widgets = []
 
         self.setWindowTitle("Yamaha Remote")
         self.setWindowIcon(QApplication.windowIcon())
         self.setFixedWidth(390)
+
+        if self.mica_enabled:
+            self.setAttribute(Qt.WA_TranslucentBackground)
 
         self.layout = QGridLayout(self)
         self.layout.setHorizontalSpacing(8)
         self.layout.setVerticalSpacing(8)
         self.layout.setContentsMargins(10, 10, 10, 10)
 
-        self.mute_status = self._new_status_label("Mute: -")
-        self.power_status = self._new_status_label("Power: Connecting...")
-        self.volume_status = self._new_status_label("Volume: -")
-        self.input_status = self._new_status_label("Input: -")
+        self.mute_status = self._new_status_label("")
+        self.power_status = self._new_status_label("")
+        self.volume_status = self._new_status_label("")
+        self.input_status = self._new_status_label("")
 
         self.layout.addWidget(self.mute_status, 0, 0)
         self.layout.addWidget(self.power_status, 0, 1)
@@ -311,6 +635,7 @@ class YamahaRemote(QWidget):
                             self.change_input(input_id)
                     )
 
+                    self.control_widgets.append(button)
                     self.layout.addWidget(
                         button,
                         row,
@@ -333,19 +658,37 @@ class YamahaRemote(QWidget):
             2,
         )
 
+        self.control_widgets.extend(
+            [
+                self.mute_button,
+                self.power_button,
+                self.volume_down_button,
+                self.volume_up_button,
+                self.input_combo,
+            ]
+        )
+
         # Size the window for the configured number of favorite rows,
-        # then prevent manual vertical resizing while the app is running.
+        # then prevent manual resizing while the app is running.
         self.setFixedHeight(self.sizeHint().height())
 
         self.refresh_timer = QTimer(self)
         self.refresh_timer.setInterval(2000)
         self.refresh_timer.timeout.connect(
-            lambda: self.update_status(quiet=True)
+            self.refresh_status
+        )
+
+        self.startup_status_timer = QTimer(self)
+        self.startup_status_timer.setSingleShot(True)
+        self.startup_status_timer.setInterval(500)
+        self.startup_status_timer.timeout.connect(
+            self.show_connecting_status
         )
 
         if self.dark_mode:
             self.apply_dark_theme()
 
+        self.set_controls_enabled(False)
         QTimer.singleShot(0, self.initialize)
 
     def showEvent(self, event):
@@ -362,8 +705,21 @@ class YamahaRemote(QWidget):
             except Exception:
                 pass
 
-        if self.dark_mode:
+        if self.dark_mode and sys.platform == "win32":
             set_dark_titlebar(int(self.winId()))
+
+    def closeEvent(self, event):
+        self.closing = True
+        self.refresh_timer.stop()
+        self.startup_status_timer.stop()
+
+        # Drop requests that have not started yet, then let the one currently
+        # running request finish before Qt destroys its worker objects.
+        self.thread_pool.clear()
+        self.thread_pool.waitForDone(2500)
+
+        self.active_workers.clear()
+        super().closeEvent(event)
 
     def _new_status_label(self, text):
         label = QLabel(text)
@@ -443,6 +799,11 @@ class YamahaRemote(QWidget):
                     background-color: rgba(38, 38, 38, 220);
                 }
 
+                QPushButton:disabled {
+                    color: rgba(235, 235, 235, 100);
+                    background-color: rgba(48, 48, 48, 100);
+                }
+
                 QComboBox {
                     background-color: rgba(48, 48, 48, 185);
                     color: rgb(235, 235, 235);
@@ -451,8 +812,11 @@ class YamahaRemote(QWidget):
                     padding: 5px 8px;
                 }
 
-                /* Keep the combo box as one clean rounded field.
-                   The whole field remains clickable; no separate arrow button is shown. */
+                QComboBox:disabled {
+                    color: rgba(235, 235, 235, 100);
+                    background-color: rgba(48, 48, 48, 100);
+                }
+
                 QComboBox::drop-down {
                     width: 0px;
                     border: none;
@@ -464,7 +828,6 @@ class YamahaRemote(QWidget):
                     width: 0px;
                     height: 0px;
                 }
-
 
                 QComboBox QAbstractItemView {
                     background-color: rgba(40, 40, 40, 240);
@@ -479,10 +842,54 @@ class YamahaRemote(QWidget):
                 }
             """)
 
-    def initialize(self):
-        try:
-            self.inputs = self.yamaha.get_inputs()
+    def start_worker(self, function, callback):
+        if self.closing:
+            return
 
+        worker = Worker(function)
+        self.active_workers.add(worker)
+
+        def completed(result, error, worker=worker):
+            self.active_workers.discard(worker)
+
+            if not self.closing:
+                callback(result, error)
+
+        worker.signals.completed.connect(completed)
+        self.thread_pool.start(worker)
+
+    def initialize(self):
+        self.refresh_timer.start()
+        self.startup_status_timer.start()
+        self.load_inputs()
+
+    def show_connecting_status(self):
+        if (
+            not self.connected
+            and not self.closing
+            and not self.power_status.text()
+        ):
+            self.power_status.setText("Power: Connecting...")
+
+    def clear_startup_status(self):
+        if self.startup_status_timer.isActive():
+            self.startup_status_timer.stop()
+
+    def load_inputs(self):
+        if self.closing:
+            return
+
+        if self.initialized_inputs:
+            self.refresh_status()
+            return
+
+        def completed(inputs, error):
+            if error is not None:
+                self.set_offline()
+                return
+
+            self.inputs = inputs
+            self.initialized_inputs = True
             self.input_combo.clear()
 
             for item in self.inputs:
@@ -498,74 +905,161 @@ class YamahaRemote(QWidget):
                     Qt.TextAlignmentRole,
                 )
 
-            self.update_status(quiet=False)
-            self.refresh_timer.start()
-        except Exception as ex:
-            self.show_error(str(ex))
+            self.refresh_status()
 
-    def show_error(self, message):
-        QMessageBox.critical(
-            self,
-            "Yamaha Remote",
-            message,
+        self.start_worker(
+            self.backend.get_inputs,
+            completed,
+        )
+
+    def set_controls_enabled(self, enabled):
+        enabled = bool(enabled)
+
+        for widget in self.control_widgets:
+            widget.setEnabled(enabled)
+
+    def update_control_states(self):
+        if not self.connected or not self.last_status:
+            self.set_controls_enabled(False)
+            return
+
+        # Power and input controls remain available in standby. Selecting an
+        # input is an intentional wake-and-switch action.
+        for widget in self.control_widgets:
+            widget.setEnabled(True)
+
+        power_on = self.last_status.get("power") == "on"
+
+        self.mute_button.setEnabled(power_on)
+        self.volume_down_button.setEnabled(power_on)
+        self.volume_up_button.setEnabled(power_on)
+
+    def set_offline(self):
+        self.clear_startup_status()
+        self.connected = False
+        self.last_status = None
+
+        self.power_status.setText("Power: Offline")
+        self.input_status.setText("Input: -")
+        self.volume_status.setText("Volume: -")
+        self.mute_status.setText("Mute: -")
+
+        self.set_controls_enabled(False)
+
+    def set_error_status(self):
+        self.power_status.setText("Power: Error")
+        self.update_control_states()
+
+    def refresh_status(self):
+        if self.closing:
+            return
+
+        if self.refresh_running or self.action_running:
+            return
+
+        self.refresh_running = True
+
+        def completed(status, error):
+            self.refresh_running = False
+
+            if error is not None:
+                if isinstance(error, ReceiverConnectionError):
+                    self.set_offline()
+                else:
+                    self.set_error_status()
+                return
+
+            self.clear_startup_status()
+            self.connected = True
+            self.last_status = status
+            self.show_cached_status()
+            self.update_control_states()
+
+            if not self.initialized_inputs:
+                self.load_inputs()
+
+        self.start_worker(
+            self.backend.get_status,
+            completed,
         )
 
     def run_action(self, action):
-        try:
-            action()
-            self.update_status(quiet=True)
-        except Exception as ex:
-            self.show_error(str(ex))
-            self.update_status(quiet=True)
+        if self.closing:
+            return
+
+        if self.action_running or not self.connected:
+            return
+
+        self.action_running = True
+
+        def completed(result, error):
+            self.action_running = False
+
+            if error is not None:
+                if isinstance(error, ReceiverConnectionError):
+                    self.set_offline()
+                else:
+                    self.set_error_status()
+                return
+
+            self.refresh_status()
+
+        self.start_worker(
+            action,
+            completed,
+        )
 
     def toggle_mute(self):
-        try:
-            status = self.yamaha.get_status()
-            self.yamaha.set_mute(
-                not bool(status.get("mute"))
-            )
-            self.update_status(quiet=True)
-        except Exception as ex:
-            self.show_error(str(ex))
+        if not self.last_status:
+            return
+
+        enabled = not bool(self.last_status.get("mute"))
+
+        self.last_status["mute"] = enabled
+        self.show_cached_status()
+
+        self.run_action(
+            lambda: self.backend.set_mute(enabled)
+        )
 
     def toggle_power(self):
-        try:
-            status = self.yamaha.get_status()
+        if not self.last_status:
+            return
 
-            if status.get("power") == "on":
-                self.yamaha.set_power(False)
-            else:
-                self.yamaha.set_power(True)
-                self.yamaha.wait_until_powered_on()
+        power_on = self.last_status.get("power") != "on"
 
-            self.update_status(quiet=True)
-        except Exception as ex:
-            self.show_error(str(ex))
+        def action():
+            self.backend.set_power(power_on)
+
+            if power_on:
+                self.backend.wait_until_powered_on()
+
+        self.run_action(action)
 
     def change_volume(self, direction):
-        try:
-            if direction < 0:
-                self.yamaha.volume_down()
-            else:
-                self.yamaha.volume_up()
+        if not self.last_status:
+            return
 
-            if (
-                self.last_status
-                and self.last_status.get("power") == "on"
-            ):
-                self.last_status["volume"] = (
-                    int(self.last_status.get("volume", 0))
-                    + direction
+        if self.last_status.get("power") == "on":
+            self.last_status["volume"] = (
+                self.backend.preview_volume(
+                    self.last_status.get("volume"),
+                    direction,
                 )
-                self.show_cached_status()
+            )
+            self.show_cached_status()
 
-        except Exception as ex:
-            self.show_error(str(ex))
-            self.update_status(quiet=True)
+        action = (
+            self.backend.volume_down
+            if direction < 0
+            else self.backend.volume_up
+        )
+
+        self.run_action(action)
 
     def change_input(self, input_id):
         self.run_action(
-            lambda: self.yamaha.set_input(input_id)
+            lambda: self.backend.set_input(input_id)
         )
 
     def input_selected(self, index):
@@ -592,13 +1086,18 @@ class YamahaRemote(QWidget):
         )
 
         volume_text = (
-            str(status.get("volume", "-"))
+            self.backend.format_volume(
+                status.get("volume")
+            )
             if power == "on"
             else "-"
         )
 
         muted = bool(status.get("mute"))
-        mute_text = "Muted" if muted else "Unmuted"
+        if power == "on":
+            mute_text = "Muted" if muted else "Unmuted"
+        else:
+            mute_text = "-"
 
         self.power_status.setText(
             f"Power: {power_text}"
@@ -617,7 +1116,7 @@ class YamahaRemote(QWidget):
             "Standby" if power == "on" else "Power On"
         )
         self.mute_button.setText(
-            "Unmute" if muted else "Mute"
+            "Unmute" if power == "on" and muted else "Mute"
         )
 
         if not self.input_combo.view().isVisible():
@@ -635,49 +1134,29 @@ class YamahaRemote(QWidget):
                     self.input_combo.setCurrentIndex(index)
                     break
 
-    def update_status(self, quiet):
-        if self.refresh_running:
-            return
-
-        self.refresh_running = True
-
-        try:
-            self.last_status = self.yamaha.get_status()
-            self.show_cached_status()
-
-        except Exception as ex:
-            self.power_status.setText("Power: Unavailable")
-            self.input_status.setText("Input: -")
-            self.volume_status.setText("Volume: -")
-            self.mute_status.setText("Mute: -")
-
-            if not quiet:
-                self.show_error(str(ex))
-
-        finally:
-            self.refresh_running = False
 
 
 def main():
-    set_app_user_model_id("Yamaha.Remote")
-
     app = QApplication(sys.argv)
+
+    if sys.platform == "win32":
+        set_app_user_model_id("Yamaha.Remote")
+
     app.setApplicationName("Yamaha Remote")
-    app.setWindowIcon(get_windows_app_icon())
+    app.setWindowIcon(get_app_icon())
 
     try:
         config = load_config()
+        window = YamahaRemote(config)
     except Exception as ex:
         QMessageBox.critical(
             None,
-            "Yamaha Remote",
+            "Yamaha Remote - Configuration Error",
             str(ex),
         )
         return 1
 
-    window = YamahaRemote(config)
     window.show()
-
     return app.exec()
 
 
