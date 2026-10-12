@@ -58,4 +58,9 @@ To read the input ID of the currently selected input, use `YamahaStatus.ps1` fro
 
 The input dropdown is populated automatically from the Yamaha device.
 
-A small subset of the win32mica library is included in the script to enable mica support.
+## Third-party code
+
+YamahaRemote includes a small amount of Windows Mica integration code adapted from
+[win32mica](https://github.com/marticliment/win32mica), licensed under the MIT License.
+
+The relevant license text is included in `THIRD_PARTY_LICENSES.txt`.
