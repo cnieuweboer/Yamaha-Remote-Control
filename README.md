@@ -26,7 +26,7 @@ YamahaRemote.pyw
 YamahaRemote.json
 ```
 
-Double-click `YamahaRemote.pyw` to launch the remote without a console window.
+Run `YamahaRemote.pyw` to launch the remote.
 
 ## Configuration
 
