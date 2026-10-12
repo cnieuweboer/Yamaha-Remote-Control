@@ -58,5 +58,4 @@ To read the input ID of the currently selected input, use `YamahaStatus.ps1` fro
 
 The input dropdown is populated automatically from the Yamaha device.
 
-
-A small subset of the win32mica is included in the script to enable mica support.
+A small subset of the win32mica library is included in the script to enable mica support.
