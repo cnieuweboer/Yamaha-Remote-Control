@@ -2,6 +2,9 @@
   "Host": "192.168.1.100",
   "DarkMode": true,
   "Mica": true,
+  "VolumeDb": true,
+  "VolumeDbAtZero": -97.0,
+  "VolumeDbStepSize": 0.5,
   "FavoriteInputs": [
     {
       "Label": "TV",

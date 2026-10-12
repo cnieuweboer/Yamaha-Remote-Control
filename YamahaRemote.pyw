@@ -62,6 +62,22 @@ def _require_bool(config, key, default):
     return value
 
 
+def _require_number(config, key):
+    if key not in config:
+        raise ConfigError(
+            f'"{key}" is required when "VolumeDb" is true.'
+        )
+
+    value = config[key]
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ConfigError(
+            f'"{key}" must be a number.'
+        )
+
+    return float(value)
+
+
 def _validate_host(value):
     if not isinstance(value, str):
         raise ConfigError(
@@ -203,6 +219,46 @@ def validate_config(raw_config):
         "CloseToTray",
         False,
     )
+    config["VolumeDb"] = _require_bool(
+        config,
+        "VolumeDb",
+        False,
+    )
+
+    if config["VolumeDb"]:
+        config["VolumeDbAtZero"] = _require_number(
+            config,
+            "VolumeDbAtZero",
+        )
+        config["VolumeDbStepSize"] = _require_number(
+            config,
+            "VolumeDbStepSize",
+        )
+
+        if config["VolumeDbStepSize"] <= 0:
+            raise ConfigError(
+                '"VolumeDbStepSize" must be greater than 0.'
+            )
+    else:
+        if "VolumeDbAtZero" in config:
+            value = config["VolumeDbAtZero"]
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ConfigError(
+                    '"VolumeDbAtZero" must be a number.'
+                )
+            config["VolumeDbAtZero"] = float(value)
+
+        if "VolumeDbStepSize" in config:
+            value = config["VolumeDbStepSize"]
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ConfigError(
+                    '"VolumeDbStepSize" must be a number.'
+                )
+            if value <= 0:
+                raise ConfigError(
+                    '"VolumeDbStepSize" must be greater than 0.'
+                )
+            config["VolumeDbStepSize"] = float(value)
 
     if config["CloseToTray"] and not config["SystemTray"]:
         raise ConfigError(
@@ -222,6 +278,9 @@ def validate_config(raw_config):
         "Mica",
         "SystemTray",
         "CloseToTray",
+        "VolumeDb",
+        "VolumeDbAtZero",
+        "VolumeDbStepSize",
         "FavoriteInputs",
     }
 
@@ -432,6 +491,23 @@ class YamahaBackend(ReceiverBackend):
             "main/getStatus",
             timeout=timeout,
         )
+
+    def format_volume(self, volume):
+        if volume is None:
+            return "-"
+
+        if not self.config.get("VolumeDb", False):
+            return str(volume)
+
+        try:
+            raw_volume = float(volume)
+            db_at_zero = self.config["VolumeDbAtZero"]
+            step_size = self.config["VolumeDbStepSize"]
+            db_value = db_at_zero + (raw_volume * step_size)
+        except (TypeError, ValueError, KeyError):
+            return str(volume)
+
+        return f"{db_value:.1f} dB"
 
     def set_power(self, on):
         state = "on" if on else "standby"
