@@ -8,7 +8,7 @@ from urllib.error import URLError
 from urllib.parse import quote
 from urllib.request import urlopen
 
-from PySide6.QtCore import QFileInfo, QObject, QRunnable, QThreadPool, QTimer, Qt, Signal
+from PySide6.QtCore import QFileInfo, QObject, QLockFile, QRunnable, QStandardPaths, QThreadPool, QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QColor, QIcon, QPalette
 from PySide6.QtWidgets import (
     QApplication,
@@ -1247,8 +1247,33 @@ class YamahaRemote(QWidget):
 
 
 
+def acquire_single_instance_lock():
+    temp_dir = QStandardPaths.writableLocation(
+        QStandardPaths.TempLocation
+    )
+
+    lock_path = str(
+        Path(temp_dir) / "YamahaRemote.lock"
+    )
+
+    lock = QLockFile(lock_path)
+
+    # If a previous instance crashed, don't leave the app permanently blocked.
+    lock.setStaleLockTime(0)
+
+    if not lock.tryLock(0):
+        return None
+
+    return lock
+
+
 def main():
     app = QApplication(sys.argv)
+
+    instance_lock = acquire_single_instance_lock()
+
+    if instance_lock is None:
+        return 0
 
     if sys.platform == "win32":
         set_app_user_model_id("Yamaha.Remote")
