@@ -11,5 +11,7 @@
       "Label": "USB DAC",
       "Input": "usb_dac"
     }
-  ]
+  ],
+  "SystemTray": false,
+  "CloseToTray": false
 }

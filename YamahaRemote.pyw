@@ -9,15 +9,18 @@ from urllib.parse import quote
 from urllib.request import urlopen
 
 from PySide6.QtCore import QFileInfo, QObject, QRunnable, QThreadPool, QTimer, Qt, Signal
-from PySide6.QtGui import QColor, QIcon, QPalette
+from PySide6.QtGui import QAction, QColor, QIcon, QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QFileIconProvider,
     QGridLayout,
+    QHBoxLayout,
+    QMenu,
     QLabel,
     QMessageBox,
     QPushButton,
+    QSystemTrayIcon,
     QWidget,
 )
 
@@ -190,6 +193,23 @@ def validate_config(raw_config):
         "Mica",
         False,
     )
+    config["SystemTray"] = _require_bool(
+        config,
+        "SystemTray",
+        False,
+    )
+    config["CloseToTray"] = _require_bool(
+        config,
+        "CloseToTray",
+        False,
+    )
+
+    if config["CloseToTray"] and not config["SystemTray"]:
+        raise ConfigError(
+            '"CloseToTray" can only be true when '
+            '"SystemTray" is also true.'
+        )
+
     config["FavoriteInputs"] = _validate_favorites(
         config.get("FavoriteInputs", [])
     )
@@ -200,6 +220,8 @@ def validate_config(raw_config):
         "YamahaIP",
         "DarkMode",
         "Mica",
+        "SystemTray",
+        "CloseToTray",
         "FavoriteInputs",
     }
 
@@ -546,6 +568,24 @@ class Worker(QRunnable):
 # UI
 # ----------------------------
 
+
+class DraggableLabel(QLabel):
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            window = self.window()
+            handle = window.windowHandle()
+
+            if handle is not None:
+                handle.startSystemMove()
+                event.accept()
+                return
+
+        super().mousePressEvent(event)
+
+
 class YamahaRemote(QWidget):
     def __init__(self, config):
         super().__init__()
@@ -556,6 +596,10 @@ class YamahaRemote(QWidget):
             and sys.platform == "win32"
             and ApplyMica is not None
         )
+        self.system_tray_enabled = config["SystemTray"]
+        self.close_to_tray = config["CloseToTray"]
+        self.force_exit = False
+        self.tray_icon = None
         self.backend = create_backend(config)
         self.favorite_inputs = config["FavoriteInputs"]
 
@@ -578,7 +622,7 @@ class YamahaRemote(QWidget):
 
         self.setWindowTitle("Yamaha Remote")
         self.setWindowIcon(QApplication.windowIcon())
-        self.setFixedWidth(390)
+        self.setFixedWidth(330)
 
         if self.mica_enabled:
             self.setAttribute(Qt.WA_TranslucentBackground)
@@ -588,15 +632,8 @@ class YamahaRemote(QWidget):
         self.layout.setVerticalSpacing(8)
         self.layout.setContentsMargins(10, 10, 10, 10)
 
-        self.mute_status = self._new_status_label("")
-        self.power_status = self._new_status_label("")
-        self.volume_status = self._new_status_label("")
-        self.input_status = self._new_status_label("")
 
-        self.layout.addWidget(self.mute_status, 0, 0)
-        self.layout.addWidget(self.power_status, 0, 1)
-        self.layout.addWidget(self.volume_status, 1, 0)
-        self.layout.addWidget(self.input_status, 1, 1)
+        self.volume_status = self._new_status_label("")
 
         self.mute_button = self._new_button("Mute")
         self.power_button = self._new_button("Standby")
@@ -612,14 +649,26 @@ class YamahaRemote(QWidget):
             lambda: self.change_volume(1)
         )
 
-        row = 2
+        row = 0
 
         self.layout.addWidget(self.mute_button, row, 0)
         self.layout.addWidget(self.power_button, row, 1)
         row += 1
 
-        self.layout.addWidget(self.volume_down_button, row, 0)
-        self.layout.addWidget(self.volume_up_button, row, 1)
+        volume_row = QHBoxLayout()
+        volume_row.setSpacing(8)
+        volume_row.setContentsMargins(0, 0, 0, 0)
+        volume_row.addWidget(self.volume_down_button, 1)
+        volume_row.addWidget(self.volume_status, 0)
+        volume_row.addWidget(self.volume_up_button, 1)
+
+        self.layout.addLayout(
+            volume_row,
+            row,
+            0,
+            1,
+            2,
+        )
         row += 1
 
         for i in range(0, len(self.favorite_inputs), 2):
@@ -645,7 +694,7 @@ class YamahaRemote(QWidget):
             row += 1
 
         self.input_combo = QComboBox()
-        self.input_combo.setMinimumHeight(32)
+        self.input_combo.setMinimumHeight(30)
         self.input_combo.activated.connect(
             self.input_selected
         )
@@ -689,7 +738,103 @@ class YamahaRemote(QWidget):
             self.apply_dark_theme()
 
         self.set_controls_enabled(False)
+
+        if self.system_tray_enabled:
+            self.setup_system_tray()
+
         QTimer.singleShot(0, self.initialize)
+
+    def setup_system_tray(self):
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            raise ConfigError(
+                "System tray support was enabled, but no "
+                "system tray is available on this desktop."
+            )
+
+        self.tray_icon = QSystemTrayIcon(
+            QApplication.windowIcon(),
+            self,
+        )
+        self.tray_icon.setToolTip("Yamaha Remote")
+
+        menu = QMenu(self)
+
+        show_action = QAction("Show", self)
+        show_action.triggered.connect(
+            self.show_from_tray
+        )
+        menu.addAction(show_action)
+
+        menu.addSeparator()
+
+        exit_action = QAction("Exit", self)
+        exit_action.triggered.connect(
+            self.exit_from_tray
+        )
+        menu.addAction(exit_action)
+
+        self.tray_icon.setContextMenu(menu)
+        self.tray_icon.activated.connect(
+            self.tray_activated
+        )
+        self.tray_icon.show()
+
+    def tray_activated(self, reason):
+        if reason == QSystemTrayIcon.DoubleClick:
+            self.show_from_tray()
+
+    def show_from_tray(self):
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def exit_from_tray(self):
+        self.force_exit = True
+
+        if self.tray_icon is not None:
+            self.tray_icon.hide()
+
+        self.close()
+
+    def closeEvent(self, event):
+        if (
+            self.close_to_tray
+            and not self.force_exit
+            and self.tray_icon is not None
+        ):
+            event.ignore()
+            self.hide()
+            return
+
+        self.closing = True
+        self.refresh_timer.stop()
+        self.startup_status_timer.stop()
+
+        # Drop requests that have not started yet, then let the one currently
+        # running request finish before Qt destroys its worker objects.
+        self.thread_pool.clear()
+        self.thread_pool.waitForDone(2500)
+
+        self.active_workers.clear()
+
+        if self.tray_icon is not None:
+            self.tray_icon.hide()
+
+        super().closeEvent(event)
+
+    def mousePressEvent(self, event):
+        if (
+            event.button() == Qt.LeftButton
+            and self.childAt(event.position().toPoint()) is None
+        ):
+            handle = self.windowHandle()
+
+            if handle is not None:
+                handle.startSystemMove()
+                event.accept()
+                return
+
+        super().mousePressEvent(event)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -708,28 +853,16 @@ class YamahaRemote(QWidget):
         if self.dark_mode and sys.platform == "win32":
             set_dark_titlebar(int(self.winId()))
 
-    def closeEvent(self, event):
-        self.closing = True
-        self.refresh_timer.stop()
-        self.startup_status_timer.stop()
-
-        # Drop requests that have not started yet, then let the one currently
-        # running request finish before Qt destroys its worker objects.
-        self.thread_pool.clear()
-        self.thread_pool.waitForDone(2500)
-
-        self.active_workers.clear()
-        super().closeEvent(event)
-
     def _new_status_label(self, text):
-        label = QLabel(text)
+        label = DraggableLabel(text, self)
         label.setAlignment(Qt.AlignCenter)
         label.setMinimumHeight(22)
+        label.setFixedWidth(52)
         return label
 
     def _new_button(self, text):
         button = QPushButton(text)
-        button.setMinimumHeight(38)
+        button.setMinimumHeight(34)
         return button
 
     def apply_dark_theme(self):
@@ -788,7 +921,7 @@ class YamahaRemote(QWidget):
                     color: rgb(235, 235, 235);
                     border: 1px solid rgba(120, 120, 120, 150);
                     border-radius: 7px;
-                    padding: 6px;
+                    padding: 5px;
                 }
 
                 QPushButton:hover {
@@ -809,7 +942,7 @@ class YamahaRemote(QWidget):
                     color: rgb(235, 235, 235);
                     border: 1px solid rgba(120, 120, 120, 150);
                     border-radius: 7px;
-                    padding: 5px 8px;
+                    padding: 4px 7px;
                 }
 
                 QComboBox:disabled {
@@ -867,9 +1000,8 @@ class YamahaRemote(QWidget):
         if (
             not self.connected
             and not self.closing
-            and not self.power_status.text()
         ):
-            self.power_status.setText("Power: Connecting...")
+            self.power_button.setText("Connecting...")
 
     def clear_startup_status(self):
         if self.startup_status_timer.isActive():
@@ -939,15 +1071,13 @@ class YamahaRemote(QWidget):
         self.connected = False
         self.last_status = None
 
-        self.power_status.setText("Power: Offline")
-        self.input_status.setText("Input: -")
-        self.volume_status.setText("Volume: -")
-        self.mute_status.setText("Mute: -")
+        self.volume_status.setText("-")
+        self.power_button.setText("Offline")
 
         self.set_controls_enabled(False)
 
     def set_error_status(self):
-        self.power_status.setText("Power: Error")
+        self.power_button.setText("Error")
         self.update_control_states()
 
     def refresh_status(self):
@@ -1079,12 +1209,6 @@ class YamahaRemote(QWidget):
         power = status.get("power", "")
         power_text = "On" if power == "on" else "Standby"
 
-        input_text = (
-            status.get("input_text")
-            or status.get("input")
-            or "-"
-        )
-
         volume_text = (
             self.backend.format_volume(
                 status.get("volume")
@@ -1094,26 +1218,13 @@ class YamahaRemote(QWidget):
         )
 
         muted = bool(status.get("mute"))
-        if power == "on":
-            mute_text = "Muted" if muted else "Unmuted"
-        else:
-            mute_text = "-"
 
-        self.power_status.setText(
-            f"Power: {power_text}"
-        )
-        self.input_status.setText(
-            f"Input: {input_text}"
-        )
         self.volume_status.setText(
-            f"Volume: {volume_text}"
-        )
-        self.mute_status.setText(
-            f"Mute: {mute_text}"
+            volume_text
         )
 
         self.power_button.setText(
-            "Standby" if power == "on" else "Power On"
+            "Standby" if power == "on" else "On"
         )
         self.mute_button.setText(
             "Unmute" if power == "on" and muted else "Mute"
