@@ -1,0 +1,15 @@
+{
+  "YamahaIP": "192.168.1.100",
+  "DarkMode": true,
+  "FavoriteInputs": [
+    {
+      "Label": "TV",
+      "Input": "tv"
+    },
+    {
+      "Label": "USB DAC",
+      "Input": "usb_dac"
+    }
+  ],
+  "Mica": true
+}
