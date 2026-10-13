@@ -2,7 +2,7 @@
 
 A small Windows remote for Yamaha receivers/amplifiers using the Yamaha Extended Control API.
 
-Designed as a simple desktop remote for common controls such as power, mute, volume, and input selection with favorites.
+Designed as a simple desktop remote for common controls such as power, mute, volume, and input selection with optional favorites.
 
 ## Requirements
 
