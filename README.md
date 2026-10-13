@@ -65,7 +65,7 @@ Edit `YamahaRemote.json`:
 - `SystemTray` — show a system tray icon.
 - `CloseToTray` — hide the main window to the system tray instead of exiting when it is closed. Requires `SystemTray` to be enabled.
 
-The `input` ID required for favorites is shown after hovering over an item in the input dropdown for 4 seconds.
+The input ID required for favorites is shown after hovering over an item in the input dropdown for 4 seconds.
 
 The input dropdown is populated automatically from the Yamaha device.
 
