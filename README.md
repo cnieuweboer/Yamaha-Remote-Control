@@ -76,7 +76,7 @@ Edit `YamahaRemote.json`:
 - `InputNameOverrides` — override input names shown in the dropdown menu.
 - `HiddenInputs` — hide selected input IDs from the dropdown menu.
 
-The input ID required for favorites, and dropdown menu configuration, is shown after hovering over an item in the input dropdown for 4 seconds.
+The input ID required for favorites, and dropdown menu configuration, is shown after hovering over an item in the input dropdown for 2 seconds.
 
 The input dropdown is populated automatically from the Yamaha device.
 
