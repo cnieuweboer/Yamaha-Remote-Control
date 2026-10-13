@@ -25,19 +25,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-if sys.platform == "win32":
-    try:
-        from win32mica import ApplyMica, MicaTheme, MicaStyle
-    except ImportError:
-        ApplyMica = None
-        MicaTheme = None
-        MicaStyle = None
-else:
-    ApplyMica = None
-    MicaTheme = None
-    MicaStyle = None
-
-
 # ----------------------------
 # Config
 # ----------------------------
@@ -372,6 +359,64 @@ def set_dark_titlebar(hwnd):
     except Exception:
         pass
 
+
+# Mica integration adapted from win32mica (MIT licensed).
+# Yamaha Remote only uses the DWM frame extension plus the documented
+# Windows 11 system backdrop API on current builds.
+class _MicaMargins(ctypes.Structure):
+    _fields_ = [
+        ("cxLeftWidth", ctypes.c_int),
+        ("cxRightWidth", ctypes.c_int),
+        ("cyTopHeight", ctypes.c_int),
+        ("cyBottomHeight", ctypes.c_int),
+    ]
+
+
+def supports_mica():
+    return (
+        sys.platform == "win32"
+        and sys.getwindowsversion().build >= 22000
+    )
+
+
+def apply_mica(hwnd):
+    if not supports_mica() or not hwnd:
+        return False
+
+    try:
+        hwnd = int(hwnd)
+        dwm = ctypes.windll.dwmapi
+
+        # Extend DWM composition over the full client area.
+        margins = _MicaMargins(-1, -1, -1, -1)
+        dwm.DwmExtendFrameIntoClientArea(
+            ctypes.c_void_p(hwnd),
+            ctypes.byref(margins),
+        )
+
+        build = sys.getwindowsversion().build
+
+        if build < 22523:
+            # Legacy Windows 11 fallback used before
+            # DWMWA_SYSTEMBACKDROP_TYPE was available.
+            attribute = 1029
+            value = ctypes.c_int(1)
+        else:
+            # DWMWA_SYSTEMBACKDROP_TYPE = 38
+            # DWMSBT_MAINWINDOW = 2 (default Mica)
+            attribute = 38
+            value = ctypes.c_int(2)
+
+        result = dwm.DwmSetWindowAttribute(
+            ctypes.c_void_p(hwnd),
+            ctypes.c_uint(attribute),
+            ctypes.byref(value),
+            ctypes.sizeof(value),
+        )
+
+        return result == 0
+    except Exception:
+        return False
 
 def get_app_icon():
     if sys.platform != "win32":
@@ -743,8 +788,7 @@ class YamahaRemote(QWidget):
         self.dark_mode = config["DarkMode"]
         self.mica_enabled = bool(
             config["Mica"]
-            and sys.platform == "win32"
-            and ApplyMica is not None
+            and supports_mica()
         )
         self.system_tray_enabled = config["SystemTray"]
         self.close_to_tray = config["CloseToTray"]
@@ -944,10 +988,6 @@ class YamahaRemote(QWidget):
 
     def exit_from_tray(self):
         self.force_exit = True
-
-        if self.tray_icon is not None:
-            self.tray_icon.hide()
-
         self.close()
 
     def closeEvent(self, event):
@@ -964,17 +1004,25 @@ class YamahaRemote(QWidget):
         self.refresh_timer.stop()
         self.startup_status_timer.stop()
 
-        # Drop requests that have not started yet, then let the one currently
-        # running request finish before Qt destroys its worker objects.
+        # Drop work that has not started, then wait for the single running
+        # receiver request to finish. Receiver operations have their own
+        # bounded network/action timeouts, so leaving a QThreadPool worker
+        # behind is both unnecessary and unsafe during interpreter shutdown.
         self.thread_pool.clear()
-        self.thread_pool.waitForDone(2500)
-
+        self.thread_pool.waitForDone(-1)
         self.active_workers.clear()
 
         if self.tray_icon is not None:
             self.tray_icon.hide()
 
-        super().closeEvent(event)
+        event.accept()
+
+        # Be explicit about terminating the application. This is especially
+        # important for tray exits, where Qt objects can otherwise outlive the
+        # main window even though it has disappeared.
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
 
     def mousePressEvent(self, event):
         if (
@@ -993,16 +1041,8 @@ class YamahaRemote(QWidget):
     def showEvent(self, event):
         super().showEvent(event)
 
-        if self.mica_enabled and ApplyMica is not None:
-            try:
-                theme = MicaTheme.DARK if self.dark_mode else MicaTheme.LIGHT
-                ApplyMica(
-                    int(self.winId()),
-                    theme,
-                    MicaStyle.DEFAULT,
-                )
-            except Exception:
-                pass
+        if self.mica_enabled:
+            apply_mica(int(self.winId()))
 
         if self.dark_mode and sys.platform == "win32":
             set_dark_titlebar(int(self.winId()))
