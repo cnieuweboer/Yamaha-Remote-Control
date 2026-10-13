@@ -16,10 +16,10 @@
     }
   ],
   "InputNameOverrides": {
-    "example_input": "Custom Input Name"
+    "example_input_ID": "Custom Input Name"
   },
   "HiddenInputs": [
-    "example_input"
+    "example_input_ID"
   ],
   "SystemTray": false,
   "CloseToTray": false
