@@ -739,7 +739,7 @@ class DraggableLabel(QLabel):
 
 
 class DelayedInputTooltip(QObject):
-    def __init__(self, combo, delay_ms=4000):
+    def __init__(self, combo, delay_ms=2000):
         super().__init__(combo)
 
         self.combo = combo
@@ -926,7 +926,7 @@ class YamahaRemote(QWidget):
         )
         self.input_hover_tooltip = DelayedInputTooltip(
             self.input_combo,
-            delay_ms=4000,
+            delay_ms=2000,
         )
 
         self.layout.addWidget(
