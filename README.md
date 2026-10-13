@@ -72,7 +72,7 @@ Edit `YamahaRemote.json`:
 - `FavoriteInputs` — buttons shown directly in the remote. `Label` is the displayed name and `Input` is the Yamaha input ID.
 - `SystemTray` — show a system tray icon.
 - `CloseToTray` — hide the main window to the system tray instead of exiting when it is closed. Requires `SystemTray` to be enabled.
-- `InputNameOverrides` — override names in the dropdown menu
+- `InputNameOverrides` — override names shown in the dropdown menu
 - `HiddenInputs` — hide input IDs in the dropdown menu
 
 The input ID required for favorites, and dropdown menu configuration, is shown after hovering over an item in the input dropdown for 4 seconds.
