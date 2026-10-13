@@ -8,8 +8,8 @@ from urllib.error import URLError
 from urllib.parse import quote
 from urllib.request import urlopen
 
-from PySide6.QtCore import QFileInfo, QObject, QLockFile, QRunnable, QStandardPaths, QThreadPool, QTimer, Qt, Signal
-from PySide6.QtGui import QAction, QColor, QIcon, QPalette
+from PySide6.QtCore import QFileInfo, QEvent, QObject, QPoint, QLockFile, QRunnable, QStandardPaths, QThreadPool, QTimer, Qt, Signal
+from PySide6.QtGui import QAction, QColor, QCursor, QIcon, QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -21,8 +21,22 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSystemTrayIcon,
+    QToolTip,
     QWidget,
 )
+
+if sys.platform == "win32":
+    try:
+        from win32mica import ApplyMica, MicaTheme, MicaStyle
+    except ImportError:
+        ApplyMica = None
+        MicaTheme = None
+        MicaStyle = None
+else:
+    ApplyMica = None
+    MicaTheme = None
+    MicaStyle = None
+
 
 # ----------------------------
 # Config
@@ -359,128 +373,6 @@ def set_dark_titlebar(hwnd):
         pass
 
 
-def apply_mica(hwnd, dark_mode):
-    """Apply the Windows 11 Mica backdrop to one native window.
-
-    This is the small subset Yamaha Remote needs from win32mica. The
-    WindowCompositionAttribute value intentionally uses 19
-    (WCA_ACCENT_POLICY), not 20; using 20 caused white minimize/close
-    animations when combined with an extended DWM frame.
-    """
-    if sys.platform != "win32":
-        return False
-
-    try:
-        if sys.getwindowsversion().build < 22000:
-            return False
-
-        user32 = ctypes.windll.user32
-        dwmapi = ctypes.windll.dwmapi
-
-        dwmapi.DwmSetWindowAttribute.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_uint,
-            ctypes.c_void_p,
-            ctypes.c_uint,
-        ]
-        dwmapi.DwmSetWindowAttribute.restype = ctypes.c_long
-        dwmapi.DwmExtendFrameIntoClientArea.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-        ]
-        dwmapi.DwmExtendFrameIntoClientArea.restype = ctypes.c_long
-
-        class AccentPolicy(ctypes.Structure):
-            _fields_ = [
-                ("AccentState", ctypes.c_uint),
-                ("AccentFlags", ctypes.c_uint),
-                ("GradientColor", ctypes.c_uint),
-                ("AnimationId", ctypes.c_uint),
-            ]
-
-        class WindowCompositionAttributeData(ctypes.Structure):
-            _fields_ = [
-                ("Attribute", ctypes.c_int),
-                ("Data", ctypes.c_void_p),
-                ("SizeOfData", ctypes.c_size_t),
-            ]
-
-        class Margins(ctypes.Structure):
-            _fields_ = [
-                ("cxLeftWidth", ctypes.c_int),
-                ("cxRightWidth", ctypes.c_int),
-                ("cyTopHeight", ctypes.c_int),
-                ("cyBottomHeight", ctypes.c_int),
-            ]
-
-        native_hwnd = ctypes.c_void_p(int(hwnd))
-
-        # Apply the requested fixed theme once. Yamaha Remote deliberately
-        # does not monitor the Windows theme in the background.
-        dark_value = ctypes.c_int(1 if dark_mode else 0)
-        result = dwmapi.DwmSetWindowAttribute(
-            native_hwnd,
-            ctypes.c_uint(20),
-            ctypes.byref(dark_value),
-            ctypes.sizeof(dark_value),
-        )
-        if result != 0:
-            dwmapi.DwmSetWindowAttribute(
-                native_hwnd,
-                ctypes.c_uint(19),
-                ctypes.byref(dark_value),
-                ctypes.sizeof(dark_value),
-            )
-
-        margins = Margins(-1, -1, -1, -1)
-        dwmapi.DwmExtendFrameIntoClientArea(
-            native_hwnd,
-            ctypes.byref(margins),
-        )
-
-        accent = AccentPolicy()
-        accent.AccentState = 5  # ACCENT_ENABLE_HOSTBACKDROP
-        accent.GradientColor = 0x00CCCCCC
-
-        composition = WindowCompositionAttributeData()
-        composition.Attribute = 19  # WCA_ACCENT_POLICY
-        composition.Data = ctypes.cast(
-            ctypes.pointer(accent),
-            ctypes.c_void_p,
-        )
-        composition.SizeOfData = ctypes.sizeof(accent)
-
-        set_composition = user32.SetWindowCompositionAttribute
-        set_composition.argtypes = [
-            ctypes.c_void_p,
-            ctypes.POINTER(WindowCompositionAttributeData),
-        ]
-        set_composition.restype = ctypes.c_int
-        set_composition(
-            native_hwnd,
-            ctypes.byref(composition),
-        )
-
-        if sys.getwindowsversion().build < 22523:
-            backdrop_attribute = 1029
-            backdrop_value = 0x01
-        else:
-            backdrop_attribute = 38  # DWMWA_SYSTEMBACKDROP_TYPE
-            backdrop_value = 0x02    # DWMSBT_MAINWINDOW
-
-        value = ctypes.c_int(backdrop_value)
-        result = dwmapi.DwmSetWindowAttribute(
-            native_hwnd,
-            ctypes.c_uint(backdrop_attribute),
-            ctypes.byref(value),
-            ctypes.sizeof(value),
-        )
-
-        return result == 0
-    except Exception:
-        return False
-
-
 def get_app_icon():
     if sys.platform != "win32":
         return QIcon()
@@ -771,6 +663,79 @@ class DraggableLabel(QLabel):
         super().mousePressEvent(event)
 
 
+class DelayedInputTooltip(QObject):
+    def __init__(self, combo, delay_ms=4000):
+        super().__init__(combo)
+
+        self.combo = combo
+        self.view = combo.view()
+        self.viewport = self.view.viewport()
+        self.hovered_row = -1
+
+        self.timer = QTimer(self)
+        self.timer.setSingleShot(True)
+        self.timer.setInterval(delay_ms)
+        self.timer.timeout.connect(self.show_tooltip)
+
+        self.viewport.setMouseTracking(True)
+        self.viewport.installEventFilter(self)
+        self.view.installEventFilter(self)
+
+    def reset(self):
+        self.timer.stop()
+        self.hovered_row = -1
+        QToolTip.hideText()
+
+    def update_hovered_row(self, position):
+        index = self.view.indexAt(position)
+        row = index.row() if index.isValid() else -1
+
+        if row == self.hovered_row:
+            return
+
+        self.timer.stop()
+        QToolTip.hideText()
+        self.hovered_row = row
+
+        if row >= 0:
+            self.timer.start()
+
+    def show_tooltip(self):
+        if self.hovered_row < 0 or not self.view.isVisible():
+            return
+
+        input_id = self.combo.itemData(self.hovered_row)
+
+        if input_id is None:
+            return
+
+        QToolTip.showText(
+            QCursor.pos() + QPoint(12, 18),
+            f"Input ID: {input_id}",
+            self.viewport,
+        )
+
+    def eventFilter(self, watched, event):
+        event_type = event.type()
+
+        if watched is self.viewport:
+            if event_type == QEvent.MouseMove:
+                self.update_hovered_row(
+                    event.position().toPoint()
+                )
+            elif event_type == QEvent.Enter:
+                self.update_hovered_row(
+                    self.viewport.mapFromGlobal(QCursor.pos())
+                )
+            elif event_type in (QEvent.Leave, QEvent.Hide):
+                self.reset()
+
+        elif watched is self.view and event_type == QEvent.Hide:
+            self.reset()
+
+        return False
+
+
 class YamahaRemote(QWidget):
     def __init__(self, config):
         super().__init__()
@@ -779,8 +744,8 @@ class YamahaRemote(QWidget):
         self.mica_enabled = bool(
             config["Mica"]
             and sys.platform == "win32"
+            and ApplyMica is not None
         )
-        self.mica_applied = False
         self.system_tray_enabled = config["SystemTray"]
         self.close_to_tray = config["CloseToTray"]
         self.force_exit = False
@@ -795,7 +760,6 @@ class YamahaRemote(QWidget):
         self.action_running = False
         self.initialized_inputs = False
         self.closing = False
-        self.polling_paused_for_tray = False
 
         # Keep receiver communication serialized. Embedded receiver APIs often
         # expect one request stream at a time, and retaining the workers also
@@ -883,6 +847,10 @@ class YamahaRemote(QWidget):
         self.input_combo.setMinimumHeight(30)
         self.input_combo.activated.connect(
             self.input_selected
+        )
+        self.input_hover_tooltip = DelayedInputTooltip(
+            self.input_combo,
+            delay_ms=4000,
         )
 
         self.layout.addWidget(
@@ -974,18 +942,6 @@ class YamahaRemote(QWidget):
         self.raise_()
         self.activateWindow()
 
-        if self.polling_paused_for_tray:
-            self.polling_paused_for_tray = False
-            self.refresh_timer.start()
-
-            if not self.connected:
-                self.startup_status_timer.start()
-
-            # Refresh immediately instead of waiting for the next 2-second
-            # polling interval. If a request from just before hiding is still
-            # running, refresh_status() will safely leave that request alone.
-            self.refresh_status()
-
     def exit_from_tray(self):
         self.force_exit = True
 
@@ -1001,12 +957,6 @@ class YamahaRemote(QWidget):
             and self.tray_icon is not None
         ):
             event.ignore()
-
-            # Nothing visible needs periodic receiver updates while the app is
-            # hidden in the tray. Resume with an immediate refresh when shown.
-            self.polling_paused_for_tray = True
-            self.refresh_timer.stop()
-            self.startup_status_timer.stop()
             self.hide()
             return
 
@@ -1043,11 +993,16 @@ class YamahaRemote(QWidget):
     def showEvent(self, event):
         super().showEvent(event)
 
-        if self.mica_enabled and not self.mica_applied:
-            self.mica_applied = apply_mica(
-                int(self.winId()),
-                self.dark_mode,
-            )
+        if self.mica_enabled and ApplyMica is not None:
+            try:
+                theme = MicaTheme.DARK if self.dark_mode else MicaTheme.LIGHT
+                ApplyMica(
+                    int(self.winId()),
+                    theme,
+                    MicaStyle.DEFAULT,
+                )
+            except Exception:
+                pass
 
         if self.dark_mode and sys.platform == "win32":
             set_dark_titlebar(int(self.winId()))
@@ -1191,10 +1146,8 @@ class YamahaRemote(QWidget):
         self.thread_pool.start(worker)
 
     def initialize(self):
-        if not self.polling_paused_for_tray:
-            self.refresh_timer.start()
-            self.startup_status_timer.start()
-
+        self.refresh_timer.start()
+        self.startup_status_timer.start()
         self.load_inputs()
 
     def show_connecting_status(self):
