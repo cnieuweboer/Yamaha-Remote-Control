@@ -84,7 +84,7 @@ means that a volume value of `100` is displayed as `-47.0 dB`.
 
 ## Third-party code
 
-YamahaRemote includes a small amount of Windows Mica integration code adapted from
+YamahaRemote includes Windows Mica integration code inspired by
 [win32mica](https://github.com/marticliment/win32mica), licensed under the MIT License.
 
 The relevant license text is included in `THIRD_PARTY_LICENSES.txt`.
