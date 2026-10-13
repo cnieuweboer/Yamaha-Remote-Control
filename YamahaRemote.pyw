@@ -167,6 +167,50 @@ def _validate_favorites(value):
     return normalized
 
 
+def _validate_input_name_overrides(value):
+    if not isinstance(value, dict):
+        raise ConfigError(
+            '"InputNameOverrides" must be an object.'
+        )
+
+    normalized = {}
+
+    for input_id, label in value.items():
+        if not isinstance(input_id, str) or not input_id.strip():
+            raise ConfigError(
+                '"InputNameOverrides" input IDs must be non-empty strings.'
+            )
+
+        if not isinstance(label, str) or not label.strip():
+            raise ConfigError(
+                f'"InputNameOverrides" value for {input_id!r} must be '
+                'a non-empty string.'
+            )
+
+        normalized[input_id.strip()] = label.strip()
+
+    return normalized
+
+
+def _validate_hidden_inputs(value):
+    if not isinstance(value, list):
+        raise ConfigError(
+            '"HiddenInputs" must be a list.'
+        )
+
+    normalized = []
+
+    for index, input_id in enumerate(value, start=1):
+        if not isinstance(input_id, str) or not input_id.strip():
+            raise ConfigError(
+                f'"HiddenInputs" item {index} must be a non-empty string.'
+            )
+
+        normalized.append(input_id.strip())
+
+    return normalized
+
+
 def validate_config(raw_config):
     if not isinstance(raw_config, dict):
         raise ConfigError(
@@ -245,6 +289,12 @@ def validate_config(raw_config):
     config["FavoriteInputs"] = _validate_favorites(
         config.get("FavoriteInputs", [])
     )
+    config["InputNameOverrides"] = _validate_input_name_overrides(
+        config.get("InputNameOverrides", {})
+    )
+    config["HiddenInputs"] = _validate_hidden_inputs(
+        config.get("HiddenInputs", [])
+    )
 
     allowed_keys = {
         "Host",
@@ -256,6 +306,8 @@ def validate_config(raw_config):
         "VolumeDbAtZero",
         "VolumeDbStepSize",
         "FavoriteInputs",
+        "InputNameOverrides",
+        "HiddenInputs",
     }
 
     unknown = set(config) - allowed_keys
@@ -774,6 +826,8 @@ class YamahaRemote(QWidget):
         self.tray_icon = None
         self.backend = YamahaBackend(config["Host"], config)
         self.favorite_inputs = config["FavoriteInputs"]
+        self.input_name_overrides = config["InputNameOverrides"]
+        self.hidden_inputs = set(config["HiddenInputs"])
 
         self.last_status = None
         self.inputs = []
@@ -1192,6 +1246,21 @@ class YamahaRemote(QWidget):
                 self.set_offline()
                 return
 
+            inputs = [
+                item
+                for item in inputs
+                if item["Id"] not in self.hidden_inputs
+            ]
+
+            for item in inputs:
+                override = self.input_name_overrides.get(item["Id"])
+                if override is not None:
+                    item["Label"] = override
+
+            inputs.sort(
+                key=lambda item: item["Label"].lower()
+            )
+
             self.inputs = inputs
             self.initialized_inputs = True
             self.input_combo.clear()
@@ -1404,6 +1473,8 @@ class YamahaRemote(QWidget):
                 status.get("input", "")
             )
 
+            matching_index = -1
+
             for index in range(
                 self.input_combo.count()
             ):
@@ -1411,8 +1482,10 @@ class YamahaRemote(QWidget):
                     str(self.input_combo.itemData(index))
                     == current_input
                 ):
-                    self.input_combo.setCurrentIndex(index)
+                    matching_index = index
                     break
+
+            self.input_combo.setCurrentIndex(matching_index)
 
 
 

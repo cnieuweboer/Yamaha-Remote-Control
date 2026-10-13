@@ -15,6 +15,12 @@
       "Input": "usb_dac"
     }
   ],
+  "InputNameOverrides": {
+    "example_input": "Custom Input Name"
+  },
+  "HiddenInputs": [
+    "example_input"
+  ],
   "SystemTray": false,
   "CloseToTray": false
 }
