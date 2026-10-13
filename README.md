@@ -59,8 +59,8 @@ Edit `YamahaRemote.json`:
 - `DarkMode` — use the dark UI theme.
 - `Mica` — enable the Windows 11 Mica background. Ignored on other platforms.
 - `VolumeDb` — display volume in dB instead of the Yamaha API's raw volume value.
-- `VolumeDbAtZero` — dB value corresponding to Yamaha volume `0`.
-- `VolumeDbStepSize` — dB change corresponding to one Yamaha volume step.
+- `VolumeDbAtZero` — dB value corresponding to volume `0`.
+- `VolumeDbStepSize` — dB change corresponding to one volume step.
 - `FavoriteInputs` — buttons shown directly in the remote. `Label` is the displayed name and `Input` is the Yamaha input ID.
 - `SystemTray` — show a system tray icon.
 - `CloseToTray` — hide the main window to the system tray instead of exiting when it is closed. Requires `SystemTray` to be enabled.
@@ -69,7 +69,9 @@ To read the input ID of the currently selected input, use `YamahaStatus.ps1` fro
 
 The input dropdown is populated automatically from the Yamaha device.
 
-When `VolumeDb` is enabled, the displayed dB value is calculated using:
+The `VolumeDb` setting can be used to match the volume shown in Yamaha's remote app or on the device itself.
+
+When it is enabled, the displayed dB value is calculated using:
 
 `dB = VolumeDbAtZero + (volume × VolumeDbStepSize)`
 
