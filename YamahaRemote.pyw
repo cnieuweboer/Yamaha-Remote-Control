@@ -1,8 +1,12 @@
 import ctypes
 import ipaddress
 import json
+import math
+import os
+import re
 import sys
 import time
+from decimal import Decimal
 from pathlib import Path
 from urllib.error import URLError
 from urllib.parse import quote
@@ -29,10 +33,7 @@ from PySide6.QtWidgets import (
 # Config
 # ----------------------------
 
-CONFIG_FILES = (
-    "YamahaRemote.json",
-    "ReceiverRemote.json",
-)
+CONFIG_FILE = "YamahaRemote.json"
 
 
 class ConfigError(ValueError):
@@ -50,20 +51,29 @@ def _require_bool(config, key, default):
     return value
 
 
+def _validate_number(value, key):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ConfigError(
+            f'"{key}" must be a number.'
+        )
+
+    value = float(value)
+
+    if not math.isfinite(value):
+        raise ConfigError(
+            f'"{key}" must be a finite number.'
+        )
+
+    return value
+
+
 def _require_number(config, key):
     if key not in config:
         raise ConfigError(
             f'"{key}" is required when "VolumeDb" is true.'
         )
 
-    value = config[key]
-
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ConfigError(
-            f'"{key}" must be a number.'
-        )
-
-    return float(value)
+    return _validate_number(config[key], key)
 
 
 def _validate_host(value):
@@ -165,25 +175,6 @@ def validate_config(raw_config):
 
     config = dict(raw_config)
 
-    # Backward compatibility with the earlier Yamaha-only config.
-    if "Host" not in config and "YamahaIP" in config:
-        config["Host"] = config["YamahaIP"]
-
-    # Accept an old multi-backend Yamaha config, but reject other brands.
-    if "Backend" in config:
-        backend = config["Backend"]
-
-        if not isinstance(backend, str):
-            raise ConfigError(
-                '"Backend" must be a string.'
-            )
-
-        if backend.strip().lower() != "yamaha":
-            raise ConfigError(
-                'This version only supports Yamaha. '
-                '"Backend" must be "yamaha".'
-            )
-
     config["Host"] = _validate_host(
         config.get("Host")
     )
@@ -229,24 +220,21 @@ def validate_config(raw_config):
             )
     else:
         if "VolumeDbAtZero" in config:
-            value = config["VolumeDbAtZero"]
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
-                raise ConfigError(
-                    '"VolumeDbAtZero" must be a number.'
-                )
-            config["VolumeDbAtZero"] = float(value)
+            config["VolumeDbAtZero"] = _validate_number(
+                config["VolumeDbAtZero"],
+                "VolumeDbAtZero",
+            )
 
         if "VolumeDbStepSize" in config:
-            value = config["VolumeDbStepSize"]
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
-                raise ConfigError(
-                    '"VolumeDbStepSize" must be a number.'
-                )
-            if value <= 0:
+            config["VolumeDbStepSize"] = _validate_number(
+                config["VolumeDbStepSize"],
+                "VolumeDbStepSize",
+            )
+
+            if config["VolumeDbStepSize"] <= 0:
                 raise ConfigError(
                     '"VolumeDbStepSize" must be greater than 0.'
                 )
-            config["VolumeDbStepSize"] = float(value)
 
     if config["CloseToTray"] and not config["SystemTray"]:
         raise ConfigError(
@@ -259,9 +247,7 @@ def validate_config(raw_config):
     )
 
     allowed_keys = {
-        "Backend",
         "Host",
-        "YamahaIP",
         "DarkMode",
         "Mica",
         "SystemTray",
@@ -287,16 +273,11 @@ def validate_config(raw_config):
 def load_config():
     script_path = Path(__file__).resolve()
 
-    config_path = None
-    for filename in CONFIG_FILES:
-        candidate = script_path.with_name(filename)
-        if candidate.exists():
-            config_path = candidate
-            break
+    config_path = script_path.with_name(CONFIG_FILE)
 
-    if config_path is None:
+    if not config_path.exists():
         raise ConfigError(
-            "YamahaRemote.json was not found next to "
+            f"{CONFIG_FILE} was not found next to "
             f"{script_path.name}."
         )
 
@@ -334,35 +315,17 @@ def set_app_user_model_id(app_id):
         pass
 
 
-def set_dark_titlebar(hwnd):
-    if sys.platform != "win32":
-        return
+# ----------------------------
+# Windows Mica integration
+# ----------------------------
+# Copy-paste friendly: this block only depends on the standard-library
+# ``ctypes`` and ``sys`` modules. Pass it a native Windows HWND, for example
+# ``int(widget.winId())`` in PySide6.
+#
+# The Mica implementation is inspired by win32mica (MIT licensed), but uses
+# the documented Windows 11 system-backdrop API on current builds. The legacy
+# attribute is retained only for early Windows 11 builds.
 
-    try:
-        value = ctypes.c_int(1)
-
-        # Windows 10 20H1+ / Windows 11
-        result = ctypes.windll.dwmapi.DwmSetWindowAttribute(
-            ctypes.c_void_p(hwnd),
-            ctypes.c_uint(20),
-            ctypes.byref(value),
-            ctypes.sizeof(value),
-        )
-
-        if result != 0:
-            ctypes.windll.dwmapi.DwmSetWindowAttribute(
-                ctypes.c_void_p(hwnd),
-                ctypes.c_uint(19),
-                ctypes.byref(value),
-                ctypes.sizeof(value),
-            )
-    except Exception:
-        pass
-
-
-# Mica integration adapted from win32mica (MIT licensed).
-# Yamaha Remote only uses the DWM frame extension plus the documented
-# Windows 11 system backdrop API on current builds.
 class _MicaMargins(ctypes.Structure):
     _fields_ = [
         ("cxLeftWidth", ctypes.c_int),
@@ -380,6 +343,7 @@ def supports_mica():
 
 
 def apply_mica(hwnd):
+    """Apply the Windows 11 Mica backdrop to a native window handle."""
     if not supports_mica() or not hwnd:
         return False
 
@@ -418,13 +382,42 @@ def apply_mica(hwnd):
     except Exception:
         return False
 
+
+def set_dark_titlebar(hwnd):
+    """Use a dark native Windows title bar when supported."""
+    if sys.platform != "win32":
+        return
+
+    try:
+        value = ctypes.c_int(1)
+
+        # Windows 10 20H1+ / Windows 11.
+        result = ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            ctypes.c_void_p(hwnd),
+            ctypes.c_uint(20),
+            ctypes.byref(value),
+            ctypes.sizeof(value),
+        )
+
+        if result != 0:
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                ctypes.c_void_p(hwnd),
+                ctypes.c_uint(19),
+                ctypes.byref(value),
+                ctypes.sizeof(value),
+            )
+    except Exception:
+        pass
+
+# End of copy-pasteable Windows Mica integration block.
+
 def get_app_icon():
     if sys.platform != "win32":
         return QIcon()
 
     try:
         windir = Path(
-            __import__("os").environ.get("WINDIR", r"C:\Windows")
+            os.environ.get("WINDIR", r"C:\Windows")
         )
         volume_mixer = windir / "System32" / "sndvol.exe"
 
@@ -438,73 +431,45 @@ def get_app_icon():
 
 
 # ----------------------------
-# Receiver backends
+# Yamaha communication
 # ----------------------------
 
-class ReceiverConnectionError(RuntimeError):
-    """Raised when the receiver cannot be reached."""
+class YamahaConnectionError(RuntimeError):
+    """Raised when the Yamaha device cannot be reached."""
 
 
-class ReceiverBackend:
-    display_name = "Receiver"
+def _decimal_places(value):
+    exponent = Decimal(str(value)).normalize().as_tuple().exponent
+    return max(0, -exponent)
 
-    def get_status(self, timeout=2):
-        raise NotImplementedError
 
-    def get_inputs(self):
-        raise NotImplementedError
-
-    def set_power(self, on):
-        raise NotImplementedError
-
-    def set_mute(self, enabled):
-        raise NotImplementedError
-
-    def volume_up(self):
-        raise NotImplementedError
-
-    def volume_down(self):
-        raise NotImplementedError
-
-    def set_input(self, input_id):
-        raise NotImplementedError
-
-    def format_volume(self, volume):
-        if volume is None:
-            return "-"
-        return str(volume)
-
-    def preview_volume(self, volume, direction):
-        return volume
-
-    def wait_until_powered_on(self, timeout=5):
-        deadline = time.monotonic() + timeout
-
-        while time.monotonic() < deadline:
-            remaining = deadline - time.monotonic()
-
-            try:
-                status = self.get_status(
-                    timeout=max(0.1, min(0.5, remaining))
-                )
-                if status.get("power") == "on":
-                    return True
-            except ReceiverConnectionError:
-                pass
-
-            time.sleep(0.1)
-
-        return False
-
-class YamahaBackend(ReceiverBackend):
-    display_name = "Yamaha"
-
+class YamahaBackend:
     def __init__(self, host, config=None):
         self.host = host
         self.config = config or {}
+
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            url_host = host
+        else:
+            url_host = (
+                f"[{host.replace('%', '%25')}]"
+                if address.version == 6
+                else host
+            )
+
         self.base_url = (
-            f"http://{host}/YamahaExtendedControl/v1"
+            f"http://{url_host}/YamahaExtendedControl/v1"
         )
+
+        if self.config.get("VolumeDb", False):
+            self.volume_db_decimals = max(
+                _decimal_places(self.config["VolumeDbAtZero"]),
+                _decimal_places(self.config["VolumeDbStepSize"]),
+            )
+        else:
+            self.volume_db_decimals = 0
 
     def _get_json(self, path, timeout=2):
         try:
@@ -516,7 +481,7 @@ class YamahaBackend(ReceiverBackend):
                     response.read().decode("utf-8")
                 )
         except (URLError, TimeoutError, OSError) as ex:
-            raise ReceiverConnectionError(
+            raise YamahaConnectionError(
                 "Unable to reach the Yamaha."
             ) from ex
 
@@ -553,7 +518,7 @@ class YamahaBackend(ReceiverBackend):
         except (TypeError, ValueError, KeyError):
             return str(volume)
 
-        return f"{db_value:.1f} dB"
+        return f"{db_value:.{self.volume_db_decimals}f} dB"
 
     def set_power(self, on):
         state = "on" if on else "standby"
@@ -584,7 +549,7 @@ class YamahaBackend(ReceiverBackend):
             self.set_power(True)
 
             if not self.wait_until_powered_on():
-                raise ReceiverConnectionError(
+                raise YamahaConnectionError(
                     "The Yamaha did not finish "
                     "powering on."
                 )
@@ -660,8 +625,24 @@ class YamahaBackend(ReceiverBackend):
         except (TypeError, ValueError):
             return volume
 
-def create_backend(config):
-    return YamahaBackend(config["Host"], config)
+    def wait_until_powered_on(self, timeout=5):
+        deadline = time.monotonic() + timeout
+
+        while time.monotonic() < deadline:
+            remaining = deadline - time.monotonic()
+
+            try:
+                status = self.get_status(
+                    timeout=max(0.1, min(0.5, remaining))
+                )
+                if status.get("power") == "on":
+                    return True
+            except YamahaConnectionError:
+                pass
+
+            time.sleep(0.1)
+
+        return False
 
 
 # ----------------------------
@@ -692,9 +673,6 @@ class Worker(QRunnable):
 
 
 class DraggableLabel(QLabel):
-    def __init__(self, text="", parent=None):
-        super().__init__(text, parent)
-
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             window = self.window()
@@ -794,7 +772,7 @@ class YamahaRemote(QWidget):
         self.close_to_tray = config["CloseToTray"]
         self.force_exit = False
         self.tray_icon = None
-        self.backend = create_backend(config)
+        self.backend = YamahaBackend(config["Host"], config)
         self.favorite_inputs = config["FavoriteInputs"]
 
         self.last_status = None
@@ -1287,7 +1265,7 @@ class YamahaRemote(QWidget):
             self.refresh_running = False
 
             if error is not None:
-                if isinstance(error, ReceiverConnectionError):
+                if isinstance(error, YamahaConnectionError):
                     self.set_offline()
                 else:
                     self.set_error_status()
@@ -1309,10 +1287,10 @@ class YamahaRemote(QWidget):
 
     def run_action(self, action):
         if self.closing:
-            return
+            return False
 
         if self.action_running or not self.connected:
-            return
+            return False
 
         self.action_running = True
 
@@ -1320,7 +1298,7 @@ class YamahaRemote(QWidget):
             self.action_running = False
 
             if error is not None:
-                if isinstance(error, ReceiverConnectionError):
+                if isinstance(error, YamahaConnectionError):
                     self.set_offline()
                 else:
                     self.set_error_status()
@@ -1332,6 +1310,7 @@ class YamahaRemote(QWidget):
             action,
             completed,
         )
+        return True
 
     def toggle_mute(self):
         if not self.last_status:
@@ -1339,12 +1318,11 @@ class YamahaRemote(QWidget):
 
         enabled = not bool(self.last_status.get("mute"))
 
-        self.last_status["mute"] = enabled
-        self.show_cached_status()
-
-        self.run_action(
+        if self.run_action(
             lambda: self.backend.set_mute(enabled)
-        )
+        ):
+            self.last_status["mute"] = enabled
+            self.show_cached_status()
 
     def toggle_power(self):
         if not self.last_status:
@@ -1364,7 +1342,13 @@ class YamahaRemote(QWidget):
         if not self.last_status:
             return
 
-        if self.last_status.get("power") == "on":
+        action = (
+            self.backend.volume_down
+            if direction < 0
+            else self.backend.volume_up
+        )
+
+        if self.run_action(action) and self.last_status.get("power") == "on":
             self.last_status["volume"] = (
                 self.backend.preview_volume(
                     self.last_status.get("volume"),
@@ -1372,14 +1356,6 @@ class YamahaRemote(QWidget):
                 )
             )
             self.show_cached_status()
-
-        action = (
-            self.backend.volume_down
-            if direction < 0
-            else self.backend.volume_up
-        )
-
-        self.run_action(action)
 
     def change_input(self, input_id):
         self.run_action(
@@ -1401,7 +1377,6 @@ class YamahaRemote(QWidget):
         status = self.last_status
 
         power = status.get("power", "")
-        power_text = "On" if power == "on" else "Standby"
 
         volume_text = (
             self.backend.format_volume(
@@ -1452,7 +1427,8 @@ def acquire_single_instance_lock():
 
     lock = QLockFile(lock_path)
 
-    # If a previous instance crashed, don't leave the app permanently blocked.
+    # Disable age-based stale detection for this long-lived lock. QLockFile
+    # can still recover a lock whose owning process no longer exists.
     lock.setStaleLockTime(0)
 
     if not lock.tryLock(0):
@@ -1477,12 +1453,21 @@ def main():
 
     try:
         config = load_config()
-        window = YamahaRemote(config)
-    except Exception as ex:
+    except ConfigError as ex:
         QMessageBox.critical(
             None,
             "Yamaha Remote - Configuration Error",
             str(ex),
+        )
+        return 1
+
+    try:
+        window = YamahaRemote(config)
+    except Exception as ex:
+        QMessageBox.critical(
+            None,
+            "Yamaha Remote - Startup Error",
+            f"{type(ex).__name__}: {ex}",
         )
         return 1
 
