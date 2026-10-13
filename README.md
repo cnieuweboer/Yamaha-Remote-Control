@@ -82,8 +82,6 @@ For example:
 
 means that a volume value of `100` is displayed as `-47.0 dB`.
 
-`VolumeDbAtZero` sets the dB value at volume `0`, while `VolumeDbStepSize` sets how much the displayed dB value changes for each volume step.
-
 ## Third-party code
 
 YamahaRemote includes a small amount of Windows Mica integration code adapted from
