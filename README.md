@@ -58,7 +58,7 @@ python3 YamahaRemote.pyw
 - `SystemTray` — show a system tray icon.
 - `CloseToTray` — clicking the window close button hides the app to the tray instead of exiting.
 
-When the input list is loaded, YamahaRemote automatically adds newly discovered inputs to `Inputs` with default settings. Existing `NameOverride`, `Hidden`, and `Favorite` values are preserved.
+YamahaRemote automatically adds newly discovered inputs to `Inputs` with default settings. Existing `NameOverride`, `Hidden`, and `Favorite` values are preserved.
 
 When `VolumeDb` is enabled, the displayed dB value is calculated using:
 
@@ -70,9 +70,6 @@ For example:
 `VolumeDbStepSize = 0.5`
 
 means that a volume value of `100` is displayed as `-47.0 dB`.
-
-The input ID is the key used for each entry under `Inputs`.
-The `Inputs`are populated automatically from the Yamaha device when the app starts.
 
 ## Third-party code
 
