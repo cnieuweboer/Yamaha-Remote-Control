@@ -71,6 +71,8 @@ For example:
 
 means that a volume value of `100` is displayed as `-47.0 dB`.
 
+The app automatically restart when it detects the json file is changed.
+
 ## Third-party code
 
 YamahaRemote includes Windows Mica integration code inspired by
