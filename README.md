@@ -4,7 +4,9 @@ Small PySide6 desktop remote for Yamaha receivers/amplifiers using the Yamaha Ex
 
 ![Yamaha Remote](screenshots/yamaha_remote.jpg)
 
-## Files
+## Installation
+
+Place these files in the same folder.
 
 ```text
 YamahaRemote.pyw
