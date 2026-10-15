@@ -1,37 +1,32 @@
 # Yamaha-Remote-Control
 
-A small Windows remote for Yamaha receivers/amplifiers using the Yamaha Extended Control API.
-
-Designed as a simple desktop remote for common controls such as power, mute, volume, and input selection with optional favorites.
+Small PySide6 desktop remote for Yamaha receivers/amplifiers using the Yamaha Extended Control API.
 
 ![Yamaha Remote](screenshots/yamaha_remote.jpg)
 
-## Requirements
-
-- Windows
-- Python 3
-- PySide6
-
-Install PySide6 with:
-
-```powershell
-py -m pip install PySide6
-```
-
-## Usage
-
-Keep these files together:
+## Files
 
 ```text
 YamahaRemote.pyw
 YamahaRemote.json
 ```
 
-Run `YamahaRemote.pyw` to launch the remote.
+## Windows
+
+```powershell
+py -m pip install PySide6
+```
+
+Run `YamahaRemote.pyw`.
+
+## macOS
+
+```bash
+python3 -m pip install PySide6
+python3 YamahaRemote.pyw
+```
 
 ## Configuration
-
-Edit `YamahaRemote.json`:
 
 ```json
 {
@@ -41,48 +36,29 @@ Edit `YamahaRemote.json`:
   "VolumeDb": true,
   "VolumeDbAtZero": -97.0,
   "VolumeDbStepSize": 0.5,
-  "FavoriteInputs": [
-    {
-      "Label": "TV",
-      "Input": "tv"
-    },
-    {
-      "Label": "USB DAC",
-      "Input": "usb_dac"
-    }
-  ],
-  "InputNameOverrides": {
-    "example_input_ID": "Custom Input Name"
-  },
-  "HiddenInputs": [
-    "example_input_ID"
-  ],
+  "Inputs": {},
   "SystemTray": false,
   "CloseToTray": false
 }
-
-
 ```
 
 - `Host` — IP address or hostname of the Yamaha device.
-- `DarkMode` — use the dark UI theme.
-- `Mica` — enable the Windows 11 Mica background. Ignored on other platforms.
-- `VolumeDb` — display volume in dB instead of the Yamaha API's raw volume value.
-- `VolumeDbAtZero` — dB value corresponding to volume `0`.
-- `VolumeDbStepSize` — dB change corresponding to one volume step.
-- `FavoriteInputs` — buttons shown directly in the remote. `Label` is the displayed name and `Input` is the Yamaha input ID.
+- `DarkMode` — `true` or `false`.
+- `Mica` — Windows-only Mica background. Ignored on macOS.
+- `VolumeDb` — display volume in dB instead of the API volume value.
+- `VolumeDbAtZero` — dB value corresponding to volume `0`. Required when `VolumeDb` is `true`.
+- `VolumeDbStepSize` — dB change corresponding to one volume step. Required when `VolumeDb` is `true` and must be greater than `0`.
+- `Inputs` — settings for the inputs discovered from the Yamaha device.
+  - `Name` — name reported by the Yamaha device. This is updated automatically.
+  - `NameOverride` — optional replacement name shown in the dropdown and on favorite buttons.
+  - `Hidden` — hide the input from the dropdown menu. Hidden inputs can still be favorites.
+  - `Favorite` — show a button for the input directly in the remote.
 - `SystemTray` — show a system tray icon.
-- `CloseToTray` — hide the main window to the system tray instead of exiting when it is closed. Requires `SystemTray` to be enabled.
-- `InputNameOverrides` — override input names shown in the dropdown menu.
-- `HiddenInputs` — hide selected input IDs from the dropdown menu.
+- `CloseToTray` — clicking the window close button hides the app to the tray instead of exiting.
 
-The input ID required for favorites, and dropdown menu configuration, is shown after hovering over an item in the input dropdown for 2 seconds.
+When the input list is loaded, YamahaRemote automatically adds newly discovered inputs to `Inputs` with default settings. Existing `NameOverride`, `Hidden`, and `Favorite` values are preserved.
 
-The input dropdown is populated automatically from the Yamaha device.
-
-The `VolumeDb` setting can be used to match the volume shown in Yamaha's remote app or on the device itself.
-
-When it is enabled, the displayed dB value is calculated using:
+When `VolumeDb` is enabled, the displayed dB value is calculated using:
 
 `dB = VolumeDbAtZero + (volume × VolumeDbStepSize)`
 
@@ -92,6 +68,9 @@ For example:
 `VolumeDbStepSize = 0.5`
 
 means that a volume value of `100` is displayed as `-47.0 dB`.
+
+The input ID is the key used for each entry under `Inputs`.
+The input dropdown and `Inputs` configuration are populated automatically from the Yamaha device.
 
 ## Third-party code
 
