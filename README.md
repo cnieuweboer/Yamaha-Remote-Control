@@ -72,7 +72,7 @@ For example:
 means that a volume value of `100` is displayed as `-47.0 dB`.
 
 The input ID is the key used for each entry under `Inputs`.
-The input dropdown and `Inputs` configuration are populated automatically from the Yamaha device.
+The `Inputs`are populated automatically from the Yamaha device when the app starts.
 
 ## Third-party code
 
