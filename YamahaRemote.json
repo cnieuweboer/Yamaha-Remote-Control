@@ -5,22 +5,7 @@
   "VolumeDb": true,
   "VolumeDbAtZero": -97.0,
   "VolumeDbStepSize": 0.5,
-  "FavoriteInputs": [
-    {
-      "Label": "TV",
-      "Input": "tv"
-    },
-    {
-      "Label": "USB DAC",
-      "Input": "usb_dac"
-    }
-  ],
-  "InputNameOverrides": {
-    "example_input_ID": "Custom Input Name"
-  },
-  "HiddenInputs": [
-    "example_input_ID"
-  ],
+  "Inputs": {},
   "SystemTray": false,
   "CloseToTray": false
 }

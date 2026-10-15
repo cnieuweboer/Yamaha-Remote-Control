@@ -1,4 +1,5 @@
 import ctypes
+import hashlib
 import ipaddress
 import json
 import math
@@ -12,8 +13,8 @@ from urllib.error import URLError
 from urllib.parse import quote
 from urllib.request import urlopen
 
-from PySide6.QtCore import QFileInfo, QEvent, QObject, QPoint, QLockFile, QRunnable, QStandardPaths, QThreadPool, QTimer, Qt, Signal
-from PySide6.QtGui import QAction, QColor, QCursor, QIcon, QPalette
+from PySide6.QtCore import QFileInfo, QFileSystemWatcher, QObject, QLockFile, QProcess, QRunnable, QStandardPaths, QThreadPool, QTimer, Qt, Signal
+from PySide6.QtGui import QAction, QColor, QIcon, QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -25,7 +26,6 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSystemTrayIcon,
-    QToolTip,
     QWidget,
 )
 
@@ -116,100 +116,82 @@ def _validate_host(value):
     return host
 
 
-def _validate_favorites(value):
-    if not isinstance(value, list):
+def _validate_inputs(value):
+    if not isinstance(value, dict):
         raise ConfigError(
-            '"FavoriteInputs" must be a list.'
+            '"Inputs" must be an object.'
         )
 
-    normalized = []
+    normalized = {}
 
-    for index, item in enumerate(value, start=1):
-        if not isinstance(item, dict):
+    for input_id, settings in value.items():
+        if not isinstance(input_id, str) or not input_id.strip():
             raise ConfigError(
-                f'"FavoriteInputs" item {index} must be an object.'
+                '"Inputs" input IDs must be non-empty strings.'
             )
 
-        unknown_keys = set(item) - {
-            "Label",
-            "Input",
+        input_id = input_id.strip()
+
+        if not isinstance(settings, dict):
+            raise ConfigError(
+                f'"Inputs" entry {input_id!r} must be an object.'
+            )
+
+        unknown_keys = set(settings) - {
+            "Name",
+            "NameOverride",
+            "Hidden",
+            "Favorite",
         }
 
         if unknown_keys:
             names = ", ".join(sorted(unknown_keys))
             raise ConfigError(
-                f'"FavoriteInputs" item {index} has unknown '
+                f'"Inputs" entry {input_id!r} has unknown '
                 f'field(s): {names}.'
             )
 
-        label = item.get("Label")
-        input_id = item.get("Input")
+        name = settings.get("Name")
+        name_override = settings.get("NameOverride", "")
+        hidden = settings.get("Hidden", False)
+        favorite = settings.get("Favorite", False)
 
-        if not isinstance(label, str) or not label.strip():
+        if not isinstance(name, str) or not name.strip():
             raise ConfigError(
-                f'"FavoriteInputs" item {index} must have a '
-                'non-empty string "Label".'
+                f'"Inputs" entry {input_id!r} must have a '
+                'non-empty string "Name".'
             )
 
-        if not isinstance(input_id, str) or not input_id.strip():
+        if not isinstance(name_override, str):
             raise ConfigError(
-                f'"FavoriteInputs" item {index} must have a '
-                'non-empty string "Input".'
+                f'"Inputs" entry {input_id!r} "NameOverride" '
+                'must be a string.'
             )
 
-        normalized.append(
-            {
-                "Label": label.strip(),
-                "Input": input_id.strip(),
-            }
-        )
+        if not isinstance(hidden, bool):
+            raise ConfigError(
+                f'"Inputs" entry {input_id!r} "Hidden" '
+                'must be true or false.'
+            )
+
+        if not isinstance(favorite, bool):
+            raise ConfigError(
+                f'"Inputs" entry {input_id!r} "Favorite" '
+                'must be true or false.'
+            )
+
+        normalized[input_id] = {
+            "Name": name.strip(),
+            "NameOverride": name_override.strip(),
+            "Hidden": hidden,
+            "Favorite": favorite,
+        }
 
     return normalized
 
 
-def _validate_input_name_overrides(value):
-    if not isinstance(value, dict):
-        raise ConfigError(
-            '"InputNameOverrides" must be an object.'
-        )
-
-    normalized = {}
-
-    for input_id, label in value.items():
-        if not isinstance(input_id, str) or not input_id.strip():
-            raise ConfigError(
-                '"InputNameOverrides" input IDs must be non-empty strings.'
-            )
-
-        if not isinstance(label, str) or not label.strip():
-            raise ConfigError(
-                f'"InputNameOverrides" value for {input_id!r} must be '
-                'a non-empty string.'
-            )
-
-        normalized[input_id.strip()] = label.strip()
-
-    return normalized
-
-
-def _validate_hidden_inputs(value):
-    if not isinstance(value, list):
-        raise ConfigError(
-            '"HiddenInputs" must be a list.'
-        )
-
-    normalized = []
-
-    for index, input_id in enumerate(value, start=1):
-        if not isinstance(input_id, str) or not input_id.strip():
-            raise ConfigError(
-                f'"HiddenInputs" item {index} must be a non-empty string.'
-            )
-
-        normalized.append(input_id.strip())
-
-    return normalized
-
+def _input_display_name(settings):
+    return settings["NameOverride"] or settings["Name"]
 
 def validate_config(raw_config):
     if not isinstance(raw_config, dict):
@@ -286,14 +268,8 @@ def validate_config(raw_config):
             '"SystemTray" is also true.'
         )
 
-    config["FavoriteInputs"] = _validate_favorites(
-        config.get("FavoriteInputs", [])
-    )
-    config["InputNameOverrides"] = _validate_input_name_overrides(
-        config.get("InputNameOverrides", {})
-    )
-    config["HiddenInputs"] = _validate_hidden_inputs(
-        config.get("HiddenInputs", [])
+    config["Inputs"] = _validate_inputs(
+        config.get("Inputs", {})
     )
 
     allowed_keys = {
@@ -305,9 +281,7 @@ def validate_config(raw_config):
         "VolumeDb",
         "VolumeDbAtZero",
         "VolumeDbStepSize",
-        "FavoriteInputs",
-        "InputNameOverrides",
-        "HiddenInputs",
+        "Inputs",
     }
 
     unknown = set(config) - allowed_keys
@@ -351,6 +325,36 @@ def load_config():
         ) from ex
 
     return validate_config(raw_config)
+
+
+def save_config(config):
+    script_path = Path(__file__).resolve()
+    config_path = script_path.with_name(CONFIG_FILE)
+    temp_path = config_path.with_suffix(config_path.suffix + ".tmp")
+
+    try:
+        temp_path.write_text(
+            json.dumps(config, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        temp_path.replace(config_path)
+    except OSError as ex:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+        raise ConfigError(
+            f"Unable to update {config_path.name}: {ex}"
+        ) from ex
+
+
+
+def _file_sha256(path):
+    try:
+        return hashlib.sha256(path.read_bytes()).digest()
+    except OSError:
+        return None
 
 
 # ----------------------------
@@ -738,78 +742,6 @@ class DraggableLabel(QLabel):
         super().mousePressEvent(event)
 
 
-class DelayedInputTooltip(QObject):
-    def __init__(self, combo, delay_ms=2000):
-        super().__init__(combo)
-
-        self.combo = combo
-        self.view = combo.view()
-        self.viewport = self.view.viewport()
-        self.hovered_row = -1
-
-        self.timer = QTimer(self)
-        self.timer.setSingleShot(True)
-        self.timer.setInterval(delay_ms)
-        self.timer.timeout.connect(self.show_tooltip)
-
-        self.viewport.setMouseTracking(True)
-        self.viewport.installEventFilter(self)
-        self.view.installEventFilter(self)
-
-    def reset(self):
-        self.timer.stop()
-        self.hovered_row = -1
-        QToolTip.hideText()
-
-    def update_hovered_row(self, position):
-        index = self.view.indexAt(position)
-        row = index.row() if index.isValid() else -1
-
-        if row == self.hovered_row:
-            return
-
-        self.timer.stop()
-        QToolTip.hideText()
-        self.hovered_row = row
-
-        if row >= 0:
-            self.timer.start()
-
-    def show_tooltip(self):
-        if self.hovered_row < 0 or not self.view.isVisible():
-            return
-
-        input_id = self.combo.itemData(self.hovered_row)
-
-        if input_id is None:
-            return
-
-        QToolTip.showText(
-            QCursor.pos() + QPoint(12, 18),
-            f"Input ID: {input_id}",
-            self.viewport,
-        )
-
-    def eventFilter(self, watched, event):
-        event_type = event.type()
-
-        if watched is self.viewport:
-            if event_type == QEvent.MouseMove:
-                self.update_hovered_row(
-                    event.position().toPoint()
-                )
-            elif event_type == QEvent.Enter:
-                self.update_hovered_row(
-                    self.viewport.mapFromGlobal(QCursor.pos())
-                )
-            elif event_type in (QEvent.Leave, QEvent.Hide):
-                self.reset()
-
-        elif watched is self.view and event_type == QEvent.Hide:
-            self.reset()
-
-        return False
-
 
 class YamahaRemote(QWidget):
     def __init__(self, config):
@@ -824,13 +756,35 @@ class YamahaRemote(QWidget):
         self.close_to_tray = config["CloseToTray"]
         self.force_exit = False
         self.tray_icon = None
+        self.config = config
         self.backend = YamahaBackend(config["Host"], config)
-        self.favorite_inputs = config["FavoriteInputs"]
-        self.input_name_overrides = config["InputNameOverrides"]
-        self.hidden_inputs = set(config["HiddenInputs"])
+        self.input_settings = config["Inputs"]
+        self.favorite_buttons = {}
 
         self.last_status = None
         self.inputs = []
+
+        self.config_path = Path(__file__).resolve().with_name(CONFIG_FILE)
+        self.config_hash = _file_sha256(self.config_path)
+        self.config_restart_pending = False
+
+        self.config_watcher = QFileSystemWatcher(self)
+        self.config_watcher.fileChanged.connect(
+            self._on_config_watch_event
+        )
+        self.config_watcher.directoryChanged.connect(
+            self._on_config_watch_event
+        )
+
+        # Event-driven debounce only: QFileSystemWatcher supplies the events.
+        # This timer does not poll the filesystem.
+        self.config_watch_timer = QTimer(self)
+        self.config_watch_timer.setSingleShot(True)
+        self.config_watch_timer.setInterval(200)
+        self.config_watch_timer.timeout.connect(
+            self._check_config_change
+        )
+
         self.connected = False
         self.refresh_running = False
         self.action_running = False
@@ -897,19 +851,28 @@ class YamahaRemote(QWidget):
         )
         row += 1
 
-        for i in range(0, len(self.favorite_inputs), 2):
+        favorite_inputs = [
+            (input_id, settings)
+            for input_id, settings in self.input_settings.items()
+            if settings["Favorite"]
+        ]
+
+        for i in range(0, len(favorite_inputs), 2):
             for column in range(2):
                 index = i + column
 
-                if index < len(self.favorite_inputs):
-                    favorite = self.favorite_inputs[index]
-                    button = self._new_button(favorite["Label"])
+                if index < len(favorite_inputs):
+                    input_id, settings = favorite_inputs[index]
+                    button = self._new_button(
+                        _input_display_name(settings)
+                    )
 
                     button.clicked.connect(
-                        lambda checked=False, input_id=favorite["Input"]:
+                        lambda checked=False, input_id=input_id:
                             self.change_input(input_id)
                     )
 
+                    self.favorite_buttons[input_id] = button
                     self.control_widgets.append(button)
                     self.layout.addWidget(
                         button,
@@ -923,10 +886,6 @@ class YamahaRemote(QWidget):
         self.input_combo.setMinimumHeight(30)
         self.input_combo.activated.connect(
             self.input_selected
-        )
-        self.input_hover_tooltip = DelayedInputTooltip(
-            self.input_combo,
-            delay_ms=2000,
         )
 
         self.layout.addWidget(
@@ -972,6 +931,7 @@ class YamahaRemote(QWidget):
         if self.system_tray_enabled:
             self.setup_system_tray()
 
+        self._start_config_watcher()
         QTimer.singleShot(0, self.initialize)
 
     def setup_system_tray(self):
@@ -1022,6 +982,106 @@ class YamahaRemote(QWidget):
         self.force_exit = True
         self.close()
 
+    def _start_config_watcher(self):
+        paths = {
+            str(self.config_path),
+            str(self.config_path.parent),
+        }
+
+        watched = set(self.config_watcher.files())
+        watched.update(self.config_watcher.directories())
+
+        missing = [
+            path
+            for path in paths
+            if path not in watched
+        ]
+
+        if missing:
+            self.config_watcher.addPaths(missing)
+
+    def _on_config_watch_event(self, _path):
+        # Many editors save by replacing the file. Watching both the file and
+        # its directory lets us re-add a replaced file without polling.
+        self.config_watch_timer.start()
+
+    def _check_config_change(self):
+        self._start_config_watcher()
+
+        new_hash = _file_sha256(self.config_path)
+
+        if new_hash is None or new_hash == self.config_hash:
+            return
+
+        try:
+            raw_config = json.loads(
+                self.config_path.read_text(encoding="utf-8")
+            )
+            validate_config(raw_config)
+        except (OSError, json.JSONDecodeError, ConfigError):
+            # Ignore partial or invalid saves. A later filesystem event will
+            # trigger another check when the editor writes valid JSON.
+            return
+
+        self.config_hash = new_hash
+        self._restart_for_config_change()
+
+    def _restart_for_config_change(self):
+        if self.config_restart_pending:
+            return
+
+        self.config_restart_pending = True
+        self.closing = True
+
+        self.refresh_timer.stop()
+        self.startup_status_timer.stop()
+        self.config_watch_timer.stop()
+
+        self.thread_pool.clear()
+        self.thread_pool.waitForDone(-1)
+        self.active_workers.clear()
+
+        app = QApplication.instance()
+        instance_lock = app.property("yamaha_instance_lock")
+
+        # Release the single-instance guard before starting the replacement.
+        if isinstance(
+            instance_lock,
+            _WindowsSingleInstanceMutex,
+        ):
+            instance_lock.close()
+        elif isinstance(instance_lock, QLockFile):
+            instance_lock.unlock()
+
+        result = QProcess.startDetached(
+            sys.executable,
+            [str(Path(__file__).resolve())],
+        )
+
+        started = (
+            result[0]
+            if isinstance(result, tuple)
+            else bool(result)
+        )
+
+        if not started:
+            # Keep this instance usable if spawning the replacement fails.
+            replacement_lock = acquire_single_instance_lock()
+            app.setProperty(
+                "yamaha_instance_lock",
+                replacement_lock,
+            )
+            self.closing = False
+            self.config_restart_pending = False
+            self.refresh_timer.start()
+            self._start_config_watcher()
+            return
+
+        if self.tray_icon is not None:
+            self.tray_icon.hide()
+
+        app.quit()
+
     def closeEvent(self, event):
         if (
             self.close_to_tray
@@ -1035,6 +1095,7 @@ class YamahaRemote(QWidget):
         self.closing = True
         self.refresh_timer.stop()
         self.startup_status_timer.stop()
+        self.config_watch_timer.stop()
 
         # Drop work that has not started, then wait for the single running
         # receiver request to finish. Receiver operations have their own
@@ -1246,22 +1307,64 @@ class YamahaRemote(QWidget):
                 self.set_offline()
                 return
 
-            inputs = [
-                item
-                for item in inputs
-                if item["Id"] not in self.hidden_inputs
-            ]
+            config_changed = False
 
             for item in inputs:
-                override = self.input_name_overrides.get(item["Id"])
-                if override is not None:
-                    item["Label"] = override
+                input_id = item["Id"]
+                yamaha_name = item["Label"]
+                settings = self.input_settings.get(input_id)
 
-            inputs.sort(
+                if settings is None:
+                    settings = {
+                        "Name": yamaha_name,
+                        "NameOverride": "",
+                        "Hidden": False,
+                        "Favorite": False,
+                    }
+                    self.input_settings[input_id] = settings
+                    config_changed = True
+                elif settings["Name"] != yamaha_name:
+                    settings["Name"] = yamaha_name
+                    config_changed = True
+
+            if config_changed:
+                try:
+                    save_config(self.config)
+                    self.config_hash = _file_sha256(
+                        self.config_path
+                    )
+                except ConfigError as ex:
+                    QMessageBox.warning(
+                        self,
+                        "Yamaha Remote - Configuration Warning",
+                        str(ex),
+                    )
+
+            visible_inputs = []
+
+            for item in inputs:
+                settings = self.input_settings[item["Id"]]
+
+                if settings["Hidden"]:
+                    continue
+
+                visible_inputs.append(
+                    {
+                        "Id": item["Id"],
+                        "Label": _input_display_name(settings),
+                    }
+                )
+
+            visible_inputs.sort(
                 key=lambda item: item["Label"].lower()
             )
 
-            self.inputs = inputs
+            for input_id, button in self.favorite_buttons.items():
+                settings = self.input_settings.get(input_id)
+                if settings is not None:
+                    button.setText(_input_display_name(settings))
+
+            self.inputs = visible_inputs
             self.initialized_inputs = True
             self.input_combo.clear()
 
@@ -1489,7 +1592,73 @@ class YamahaRemote(QWidget):
 
 
 
+class _WindowsSingleInstanceMutex:
+    ERROR_ALREADY_EXISTS = 183
+
+    def __init__(self, name):
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=False)
+
+        kernel32.CreateMutexW.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_bool,
+            ctypes.c_wchar_p,
+        ]
+        kernel32.CreateMutexW.restype = ctypes.c_void_p
+
+        kernel32.GetLastError.argtypes = []
+        kernel32.GetLastError.restype = ctypes.c_ulong
+
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle.restype = ctypes.c_bool
+
+        handle = kernel32.CreateMutexW(
+            None,
+            False,
+            name,
+        )
+
+        # GetLastError must be read immediately after CreateMutexW.
+        error = kernel32.GetLastError()
+
+        if not handle:
+            raise OSError(
+                error,
+                "CreateMutexW failed.",
+            )
+
+        if error == self.ERROR_ALREADY_EXISTS:
+            kernel32.CloseHandle(handle)
+            self.handle = None
+            self.kernel32 = None
+            return
+
+        self.handle = handle
+        self.kernel32 = kernel32
+
+    @property
+    def acquired(self):
+        return self.handle is not None
+
+    def close(self):
+        if self.handle is not None:
+            self.kernel32.CloseHandle(self.handle)
+            self.handle = None
+
+    def __del__(self):
+        self.close()
+
+
 def acquire_single_instance_lock():
+    if sys.platform == "win32":
+        mutex = _WindowsSingleInstanceMutex(
+            "YamahaRemote.SingleInstance"
+        )
+
+        if not mutex.acquired:
+            return None
+
+        return mutex
+
     temp_dir = QStandardPaths.writableLocation(
         QStandardPaths.TempLocation
     )
@@ -1518,6 +1687,11 @@ def main():
     if instance_lock is None:
         return 0
 
+    app.setProperty(
+        "yamaha_instance_lock",
+        instance_lock,
+    )
+
     if sys.platform == "win32":
         set_app_user_model_id("Yamaha.Remote")
 
@@ -1545,7 +1719,15 @@ def main():
         return 1
 
     window.show()
-    return app.exec()
+
+    try:
+        return app.exec()
+    finally:
+        if isinstance(
+            instance_lock,
+            _WindowsSingleInstanceMutex,
+        ):
+            instance_lock.close()
 
 
 if __name__ == "__main__":
