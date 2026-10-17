@@ -5,6 +5,7 @@
   "VolumeDb": true,
   "VolumeDbAtZero": -97.0,
   "VolumeDbStepSize": 0.5,
+  "GlobalVolumeHotkeys": false,
   "DiagnosticsEnabled": false,
   "SortByName": false,
   "Inputs": {},

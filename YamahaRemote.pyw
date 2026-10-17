@@ -11,6 +11,7 @@ import sys
 import time
 import threading
 import traceback
+from collections import deque
 from decimal import Decimal
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -41,7 +42,7 @@ from PySide6.QtWidgets import (
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.17.7"
+__version__ = "2026.10.18.1"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -54,6 +55,8 @@ POLL_INTERVAL_MS = 2000
 
 
 CONFIG_RESTART_DEBOUNCE_MS = 200
+HOTKEY_STATE_MAX_AGE_SECONDS = 6.0
+MAX_PENDING_HOTKEYS = 8
 
 
 # ----------------------------
@@ -68,6 +71,7 @@ DEFAULT_CONFIG = {
     "VolumeDb": False,
     "VolumeDbAtZero": -97.0,
     "VolumeDbStepSize": 0.5,
+    "GlobalVolumeHotkeys": False,
     "DiagnosticsEnabled": False,
     "SortByName": False,
     "Inputs": {},
@@ -271,6 +275,7 @@ def validate_config(raw_config, *, allow_incomplete=False):
     config = _default_config_copy()
     config.update(raw_config)
 
+    config["GlobalVolumeHotkeys"] = _require_bool(config, "GlobalVolumeHotkeys", False)
     config["DiagnosticsEnabled"] = _require_bool(config, "DiagnosticsEnabled", False)
     config["SortByName"] = _require_bool(config, "SortByName", False)
     config["Host"] = _validate_host(
@@ -345,6 +350,7 @@ def validate_config(raw_config, *, allow_incomplete=False):
     config["Inputs"] = _validate_entries(config.get("Inputs", {}), "Inputs")
 
     allowed_keys = {
+        "GlobalVolumeHotkeys",
         "DiagnosticsEnabled",
         "SortByName",
         "Host",
@@ -665,6 +671,222 @@ def get_app_icon():
         pass
 
     return QIcon()
+
+
+# Only these three media keys belong to the amplifier remote.
+_VOLUME_KEYS = {0xAF: "volume_up", 0xAE: "volume_down", 0xAD: "mute"}
+_RETAINED_VOLUME_HOOKS = []
+_QT_VOLUME_KEYS = {
+    Qt.Key_VolumeUp: "volume_up",
+    Qt.Key_VolumeDown: "volume_down",
+    Qt.Key_VolumeMute: "mute",
+}
+
+
+class _VolumeKeyState:
+    """Keep a physical press with its original owner until release."""
+
+    def __init__(self):
+        self.pressed = {}
+
+    def press(self, key, command, accept):
+        if key in self.pressed:
+            owned = self.pressed[key]
+            if owned and command != "mute":
+                accept(command)
+            return owned
+        owned = bool(accept(command))
+        self.pressed[key] = owned
+        return owned
+
+    def release(self, key):
+        return self.pressed.pop(key, False)
+
+
+class _LowLevelKey(ctypes.Structure):
+    _fields_ = [
+        ("vkCode", ctypes.c_uint32), ("scanCode", ctypes.c_uint32),
+        ("flags", ctypes.c_uint32), ("time", ctypes.c_uint32),
+        ("dwExtraInfo", ctypes.c_size_t),
+    ]
+
+
+class _NativePoint(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_int32), ("y", ctypes.c_int32)]
+
+
+class _NativeMessage(ctypes.Structure):
+    _fields_ = [
+        ("hwnd", ctypes.c_void_p), ("message", ctypes.c_uint32),
+        ("wParam", ctypes.c_size_t), ("lParam", ctypes.c_ssize_t),
+        ("time", ctypes.c_uint32), ("pt", _NativePoint),
+        ("lPrivate", ctypes.c_uint32),
+    ]
+
+
+_HookProc = getattr(ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE)(
+    ctypes.c_ssize_t, ctypes.c_int, ctypes.c_size_t, ctypes.c_ssize_t
+)
+
+
+def _load_volume_hook_api():
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    signatures = (
+        (user32.SetWindowsHookExW, [ctypes.c_int, _HookProc, ctypes.c_void_p, ctypes.c_uint32], ctypes.c_void_p),
+        (user32.UnhookWindowsHookEx, [ctypes.c_void_p], ctypes.c_int),
+        (user32.CallNextHookEx, [ctypes.c_void_p, ctypes.c_int, ctypes.c_size_t, ctypes.c_ssize_t], ctypes.c_ssize_t),
+        (user32.GetForegroundWindow, [], ctypes.c_void_p),
+        (user32.GetAsyncKeyState, [ctypes.c_int], ctypes.c_int16),
+        (user32.PeekMessageW, [ctypes.POINTER(_NativeMessage), ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32], ctypes.c_int),
+        (user32.GetMessageW, [ctypes.POINTER(_NativeMessage), ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32], ctypes.c_int),
+        (user32.PostThreadMessageW, [ctypes.c_uint32, ctypes.c_uint32, ctypes.c_size_t, ctypes.c_ssize_t], ctypes.c_int),
+        (kernel32.GetModuleHandleW, [ctypes.c_wchar_p], ctypes.c_void_p),
+        (kernel32.GetCurrentThreadId, [], ctypes.c_uint32),
+    )
+    for function, arguments, result in signatures:
+        function.argtypes = arguments
+        function.restype = result
+    return user32, kernel32
+
+
+class _WindowsVolumeHook(QObject):
+    changed = Signal(bool, object)
+
+    def __init__(self, accept, parent=None):
+        super().__init__(parent)
+        self._accept = accept
+        self._keys = _VolumeKeyState()
+        self._hook = None
+        self._callback = None
+        self._user32 = None
+        self._thread_id = None
+        self._thread = None
+        self._stopping = threading.Event()
+        self._faulted = False
+
+    @property
+    def installed(self):
+        return bool(self._hook and not self._faulted and not self._stopping.is_set())
+
+    def start(self):
+        # A separate native message loop keeps the hook responsive even while
+        # the GUI waits for workers during restart/shutdown. No Qt UI calls or
+        # network/file operations run inside the native callback.
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._run, name="VolumeHotkeys", daemon=True)
+        self._thread.start()
+
+    def _notify(self, installed, error=None):
+        try:
+            self.changed.emit(installed, error)
+        except RuntimeError:
+            pass  # The Qt parent may already be closing.
+
+    def _run(self):
+        error = None
+        try:
+            self._user32, kernel32 = _load_volume_hook_api()
+            message = _NativeMessage()
+            self._user32.PeekMessageW(ctypes.byref(message), None, 0, 0, 0)
+            self._thread_id = kernel32.GetCurrentThreadId()
+            # Do not seize keys that were already held when the app started.
+            self._keys.pressed = {
+                key: False for key in _VOLUME_KEYS
+                if self._user32.GetAsyncKeyState(key) & 0x8000
+            }
+            self._callback = _HookProc(self._handle_key)
+            self._hook = self._user32.SetWindowsHookExW(
+                13, self._callback, kernel32.GetModuleHandleW(None), 0
+            )
+            if not self._hook:
+                raise ctypes.WinError()
+            self._notify(True)
+            while not self._stopping.is_set():
+                result = self._user32.GetMessageW(ctypes.byref(message), None, 0, 0)
+                if result == 0:
+                    break
+                if result == -1:
+                    raise ctypes.WinError()
+        except Exception as exc:
+            error = exc
+            self._faulted = True
+        finally:
+            if self._hook:
+                try:
+                    if not self._user32.UnhookWindowsHookEx(self._hook):
+                        raise ctypes.WinError()
+                    self._hook = None
+                except Exception as exc:
+                    error = error or exc
+                    self._faulted = True
+            # Keep the C callback alive if native unregistration failed.
+            if self._hook is None:
+                self._callback = None
+            elif self not in _RETAINED_VOLUME_HOOKS:
+                _RETAINED_VOLUME_HOOKS.append(self)
+            self._thread_id = None
+            self._notify(False, error)
+
+    def _handle_key(self, code, message, address):
+        key = None
+        if code == 0 and message in (0x100, 0x101, 0x104, 0x105):
+            try:
+                data = ctypes.cast(address, ctypes.POINTER(_LowLevelKey)).contents
+                key = data.vkCode
+                command = _VOLUME_KEYS.get(key)
+                # Remappers can generate injected volume-key events. They are
+                # safe to handle too: this remote never synthesizes key events.
+                if command:
+                    if message in (0x101, 0x105):
+                        owned = self._keys.release(data.vkCode)
+                    else:
+                        foreground = self._user32.GetForegroundWindow()
+                        owned = self._keys.press(
+                            data.vkCode, command,
+                            lambda value: (
+                                not self._faulted and not self._stopping.is_set()
+                                and self._accept(value, foreground)
+                            ),
+                        )
+                    if owned:
+                        return 1
+            except Exception as error:
+                if not self._faulted:
+                    self._faulted = True
+                    self._notify(False, error)
+                if self._keys.pressed.get(key, False):
+                    return 1
+        try:
+            return self._user32.CallNextHookEx(self._hook, code, message, address)
+        except Exception as error:
+            if not self._faulted:
+                self._faulted = True
+                self._notify(False, error)
+            return 0  # Never let a Python exception escape a native callback.
+
+    def stop(self):
+        self._stopping.set()
+        if self._thread is not None and self._thread.is_alive() and self._thread_id and self._user32:
+            try:
+                if not self._user32.PostThreadMessageW(self._thread_id, 0x12, 0, 0):  # WM_QUIT
+                    raise ctypes.WinError()
+            except Exception as error:
+                record_exception(error, "Hotkey shutdown")
+        if self._thread is not None and self._thread.ident is not None:
+            self._thread.join(timeout=2)
+        if self._thread is not None and self._thread.is_alive():
+            # Never free a live C callback. Disable interception even if the
+            # native message thread cannot be stopped normally.
+            try:
+                if self._hook and self._user32.UnhookWindowsHookEx(self._hook):
+                    self._hook = None
+            except Exception as error:
+                record_exception(error, "Hotkey shutdown")
+            if self._hook and self not in _RETAINED_VOLUME_HOOKS:
+                _RETAINED_VOLUME_HOOKS.append(self)
+            record_exception(RuntimeError("Volume hotkey thread did not stop."), "Hotkey shutdown")
 
 
 # ----------------------------
@@ -1063,6 +1285,8 @@ class DraggableLabel(QLabel):
 
 
 class YamahaRemote(QWidget):
+    _hotkey_ready = Signal()
+
 
     # ----------------------------
     # Initialization
@@ -1095,12 +1319,21 @@ class YamahaRemote(QWidget):
         self.favorite_buttons = {}
         self.control_widgets = []
         self._polling_initialized = False
+        self._last_status_at = None
+        self._hotkey_lock = threading.Lock()
+        self._pending_hotkeys = deque()
+        self._hotkey_drain_scheduled = False
+        self._hotkey_state_refresh_pending = False
+        self._hotkey_state = (False, False, 0, None, False)
+        self._qt_volume_keys = _VolumeKeyState()
+        self._native_volume_hook = None
 
         self._build_ui()
         self._apply_style()
         self._setup_timers()
         self._setup_config_watcher()
         self._setup_tray()
+        self._setup_hotkeys()
         self.set_controls_enabled(False)
         QTimer.singleShot(0, self.initialize)
 
@@ -1118,9 +1351,30 @@ class YamahaRemote(QWidget):
             self.show_connecting_status
         )
 
+    def _setup_hotkeys(self):
+        app = QApplication.instance()
+        app.installEventFilter(self)
+        self._hotkey_ready.connect(self._drain_hotkeys, Qt.QueuedConnection)
+        if sys.platform == "win32":
+            self._native_volume_hook = _WindowsVolumeHook(self._accept_native_hotkey, self)
+            self._native_volume_hook.changed.connect(self._native_hotkey_changed)
+            self._publish_hotkey_state()
+            try:
+                self._native_volume_hook.start()
+            except Exception as error:
+                QTimer.singleShot(0, lambda error=error: self._native_hotkey_changed(False, error))
+        elif self.config["GlobalVolumeHotkeys"]:
+            QTimer.singleShot(0, lambda: self.show_error(
+                "Global volume hotkeys are supported on Windows only. "
+                "Volume keys still work while this window is focused."
+            ))
+
+
     # ----------------------------
     # UI construction and styling
     # ----------------------------
+
+
 
     def _build_ui(self):
         self.setWindowTitle(APP_NAME)
@@ -1388,7 +1642,7 @@ class YamahaRemote(QWidget):
         worker.signals.finished.connect(finished)
         self.pool.start(worker)
 
-    def run_action(self, action):
+    def run_action(self, action, *, background=False):
         if self._shutting_down:
             return False
 
@@ -1400,11 +1654,13 @@ class YamahaRemote(QWidget):
         def done(result):
             self.action_running = False
             self.poll_status()
+            self._schedule_hotkey_drain()
 
         def failed(error):
             self.action_running = False
-            self.handle_request_error(error)
+            self.handle_request_error(error, background=background)
             self.poll_status()
+            self._schedule_hotkey_drain()
 
         self.run_worker(action, on_result=done, on_error=failed)
         return True
@@ -1514,8 +1770,7 @@ class YamahaRemote(QWidget):
             self.startup_status_timer.stop()
 
     def poll_status(self):
-        if (self._shutting_down or missing_config_settings(self.config)
-                or not self.isVisible() or self.isMinimized()):
+        if not self._should_poll():
             return
 
         if self.poll_running or self.action_running:
@@ -1523,31 +1778,47 @@ class YamahaRemote(QWidget):
 
         self.poll_running = True
 
-        def done(status):
+        def query():
+            return self.api.get_status(), time.monotonic()
+
+        def done(result):
+            status, observed_at = result
             self.poll_running = False
             self.clear_startup_status()
             self.connected = True
             self.power_button.setToolTip("")
             self.last_status = status
+            self._last_status_at = observed_at
+            self._publish_hotkey_state()
             self.show_cached_status()
             self.update_control_states()
 
             if not self.initialized:
                 self.load_inputs()
+            self._schedule_hotkey_drain()
 
         def failed(error):
             self.poll_running = False
             self.handle_request_error(error, background=True)
 
-        self.run_worker(self.api.get_status, on_result=done, on_error=failed)
+        self.run_worker(query, on_result=done, on_error=failed)
+
+    def _should_poll(self):
+        background_control = bool(
+            self.config["GlobalVolumeHotkeys"] and self._native_volume_hook is not None
+            and self._native_volume_hook.installed
+        )
+        return bool(
+            not self._shutting_down and self._polling_initialized
+            and not missing_config_settings(self.config)
+            and ((self.isVisible() and not self.isMinimized()) or background_control)
+        )
+
 
     def _update_polling_state(self, refresh=False):
         if self._shutting_down or not hasattr(self, "poll_timer"):
             return
-        should_poll = (
-            self._polling_initialized and self.isVisible() and not self.isMinimized()
-            and not missing_config_settings(self.config)
-        )
+        should_poll = self._should_poll()
         if should_poll:
             if refresh:
                 self.poll_status()
@@ -1607,6 +1878,8 @@ class YamahaRemote(QWidget):
         self.clear_startup_status()
         self.connected = False
         self.last_status = None
+        self._last_status_at = None
+        self._publish_hotkey_state()
 
         self.volume_value.setText("-")
         self.power_button.setText("Offline")
@@ -1617,6 +1890,8 @@ class YamahaRemote(QWidget):
         self.clear_startup_status()
         self.connected = False
         self.last_status = None
+        self._last_status_at = None
+        self._publish_hotkey_state()
         self.volume_value.setText("-")
         self.power_button.setText("Error")
         self.set_controls_enabled(False)
@@ -1687,19 +1962,19 @@ class YamahaRemote(QWidget):
 
         self.run_action(action)
 
-    def toggle_mute(self):
+    def toggle_mute(self, *, background=False):
         if not self.last_status:
             return
 
         enabled = not bool(self.last_status.get("mute"))
 
         if self.run_action(
-            lambda: self.api.set_mute(enabled)
+            lambda: self.api.set_mute(enabled), background=background
         ):
             self.last_status["mute"] = enabled
             self.show_cached_status()
 
-    def adjust_volume(self, direction):
+    def adjust_volume(self, direction, *, background=False):
         if not self.last_status:
             return
 
@@ -1709,7 +1984,7 @@ class YamahaRemote(QWidget):
             else self.api.volume_up
         )
 
-        if self.run_action(action) and self.last_status.get("power") == "on":
+        if self.run_action(action, background=background) and self.last_status.get("power") == "on":
             self.last_status["volume"] = (
                 self.api.preview_volume(
                     self.last_status.get("volume"),
@@ -1730,6 +2005,136 @@ class YamahaRemote(QWidget):
         self.run_action(
             lambda: self.api.set_input(input_id)
         )
+
+
+    # ----------------------------
+    # Volume hotkeys
+    # ----------------------------
+
+    def _native_hotkey_changed(self, installed, error):
+        if self._shutting_down:
+            return
+        self._publish_hotkey_state()
+        self._update_polling_state(refresh=installed)
+        if error is not None:
+            record_exception(error, "Windows volume hotkeys")
+            self.show_error(
+                "Windows volume-key interception is unavailable. "
+                "Global hotkeys will not be claimed; focused Qt handling may be limited."
+            )
+
+    def _volume_hotkeys_eligible(self):
+        status = self.last_status or {}
+        volume = status.get("volume")
+        valid_volume = (
+            isinstance(volume, (int, float)) and not isinstance(volume, bool)
+            and (not isinstance(volume, float) or math.isfinite(volume))
+        )
+        return bool(
+            not self._shutting_down and self.connected and status.get("power") == "on"
+            and valid_volume and isinstance(status.get("mute"), bool)
+            and self._last_status_at is not None
+            and time.monotonic() - self._last_status_at <= HOTKEY_STATE_MAX_AGE_SECONDS
+        )
+
+    @property
+    def global_volume_hotkeys_active(self):
+        return bool(
+            self.config["GlobalVolumeHotkeys"]
+            and self._native_volume_hook is not None and self._native_volume_hook.installed
+            and self._volume_hotkeys_eligible()
+            and QApplication.activeModalWidget() is None
+        )
+
+    def _publish_hotkey_state(self):
+        # The native hook thread reads only this plain-Python snapshot. Qt
+        # focus/modal queries stay on the GUI thread.
+        if not hasattr(self, "_hotkey_lock"):
+            return
+        state = (
+            self._volume_hotkeys_eligible(), self.config["GlobalVolumeHotkeys"],
+            int(self.winId()) if sys.platform == "win32" and self.isVisible() and not self.isMinimized() else 0,
+            self._last_status_at, QApplication.activeModalWidget() is not None,
+        )
+        with self._hotkey_lock:
+            self._hotkey_state = state
+            if not state[0]:
+                self._pending_hotkeys.clear()
+
+    def _refresh_hotkey_state(self):
+        self._hotkey_state_refresh_pending = False
+        if not self._shutting_down:
+            self._publish_hotkey_state()
+
+    def _accept_native_hotkey(self, command, foreground):
+        with self._hotkey_lock:
+            eligible, global_mode, window, observed_at, blocked = self._hotkey_state
+            if (not eligible or blocked or observed_at is None
+                    or time.monotonic() - observed_at > HOTKEY_STATE_MAX_AGE_SECONDS
+                    or (not global_mode and (not window or foreground != window))):
+                return False
+            return self._enqueue_hotkey_locked(command)
+
+    def _enqueue_hotkey_locked(self, command):
+        if command not in _VOLUME_KEYS.values() or len(self._pending_hotkeys) >= MAX_PENDING_HOTKEYS:
+            return False
+        self._pending_hotkeys.append(command)
+        if not self._hotkey_drain_scheduled:
+            self._hotkey_drain_scheduled = True
+            self._hotkey_ready.emit()
+        return True
+
+    def _accept_focused_hotkey(self, command):
+        if (not self.isActiveWindow() or QApplication.activeModalWidget() is not None
+                or not self._volume_hotkeys_eligible()):
+            return False
+        with self._hotkey_lock:
+            return self._enqueue_hotkey_locked(command)
+
+    def _schedule_hotkey_drain(self):
+        with self._hotkey_lock:
+            if self._pending_hotkeys and not self._hotkey_drain_scheduled:
+                self._hotkey_drain_scheduled = True
+                self._hotkey_ready.emit()
+
+    def _drain_hotkeys(self):
+        with self._hotkey_lock:
+            self._hotkey_drain_scheduled = False
+            if not self._volume_hotkeys_eligible() or QApplication.activeModalWidget() is not None:
+                self._pending_hotkeys.clear()
+                return
+            if self.action_running or self.poll_running or not self._pending_hotkeys:
+                return
+            command = self._pending_hotkeys.popleft()
+        if command == "mute":
+            self.toggle_mute(background=True)
+        else:
+            self.adjust_volume(1 if command == "volume_up" else -1, background=True)
+
+
+    def eventFilter(self, watched, event):
+        event_type = event.type()
+        if event_type in (QEvent.Show, QEvent.Hide, QEvent.WindowActivate, QEvent.WindowDeactivate):
+            if not self._hotkey_state_refresh_pending and not self._shutting_down:
+                self._hotkey_state_refresh_pending = True
+                QTimer.singleShot(0, self._refresh_hotkey_state)
+        if event_type not in (QEvent.KeyPress, QEvent.KeyRelease):
+            return super().eventFilter(watched, event)
+        command = _QT_VOLUME_KEYS.get(event.key())
+        # Windows' native hook already handles both focused and global keys.
+        if command is None or (self._native_volume_hook is not None and self._native_volume_hook.installed):
+            return super().eventFilter(watched, event)
+        if event_type == QEvent.KeyRelease:
+            owned = self._qt_volume_keys.pressed.get(event.key(), False) if event.isAutoRepeat() else self._qt_volume_keys.release(event.key())
+        else:
+            if event.isAutoRepeat() and event.key() not in self._qt_volume_keys.pressed:
+                self._qt_volume_keys.pressed[event.key()] = False
+            owned = self._qt_volume_keys.press(event.key(), command, self._accept_focused_hotkey)
+        if owned:
+            event.accept()
+            return True
+        return super().eventFilter(watched, event)
+
 
     # ----------------------------
     # Configuration watching and restart
@@ -1905,6 +2310,8 @@ class YamahaRemote(QWidget):
 
     def _pause_background_work(self):
         self._shutting_down = True
+        self._publish_hotkey_state()
+        self._qt_volume_keys.pressed.clear()
         self._worker_generation += 1
         timers = (self.poll_timer, self.startup_status_timer, self.config_restart_timer)
         active_timers = [timer for timer in timers if timer.isActive()]
@@ -1922,6 +2329,7 @@ class YamahaRemote(QWidget):
     def _resume_background_work(self, active_timers):
         self._shutting_down = False
         self._config_restart_pending = False
+        self._publish_hotkey_state()
         self.config_watcher.blockSignals(False)
         self._watch_config_paths()
         for timer in active_timers:
@@ -1937,6 +2345,9 @@ class YamahaRemote(QWidget):
         self._pause_background_work()
         self._shutdown_complete = True
         self._really_close = True
+        QApplication.instance().removeEventFilter(self)
+        if self._native_volume_hook is not None:
+            self._native_volume_hook.stop()
         if self.tray is not None:
             self.tray.hide()
         release_single_instance()
@@ -1953,14 +2364,20 @@ class YamahaRemote(QWidget):
 
         if self.config["DarkMode"] and sys.platform == "win32":
             set_dark_titlebar(int(self.winId()))
+        self._publish_hotkey_state()
         self._update_polling_state(refresh=True)
 
     def hideEvent(self, event):
         super().hideEvent(event)
+        self._publish_hotkey_state()
+        self._qt_volume_keys.pressed.clear()
         self._update_polling_state()
 
     def changeEvent(self, event):
         super().changeEvent(event)
+        self._publish_hotkey_state()
+        if event.type() == QEvent.ActivationChange and not self.isActiveWindow():
+            self._qt_volume_keys.pressed.clear()
         if event.type() == QEvent.WindowStateChange:
             QTimer.singleShot(
                 0,
