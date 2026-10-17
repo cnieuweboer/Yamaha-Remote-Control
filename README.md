@@ -106,6 +106,14 @@ The generic `remote-control.amplifier.v1.<user-suffix>` endpoint uses `QLocalSer
 
 `raw_max_volume` describes the network control interface's ceiling, not the amplifier's physical maximum. No TV-scale conversion, volume-setting synchronization back to the TV, or calibration is performed in this release. Sony displays the amplifier's raw value while routing, with a source tooltip. Two-point calibration, caps, and alternative mappings remain a later step.
 
+## Calibration helper — session and restoration stage
+
+Release `2026.10.18.5` adds exclusive calibration sessions. Update **both** remotes before using `VolumeCalibration.pyw`, available in the Sony Remote repository. The helper is a separate, self-contained PySide6 application and communicates only through generic local IPC endpoints. It does not read either remote's settings or credentials.
+
+During a session, both remotes reuse their existing polling timers at 250 ms, including while hidden. Ordinary controls are disabled and pending volume targets are cleared. Yamaha's Windows hook consumes volume/mute media keys without issuing device commands, so they cannot unmute Windows or change volume during the test. Config-driven restarts wait until the session ends. A socket-owned eight-second lease, renewed by the helper, restores normal polling and controls on release, disconnect, or helper failure. Only the owner can perform calibration operations; API work stays in the existing device workers.
+
+The helper first captures the selected amplifier input through IPC. This stage does not change `AmplifierTVInput`, save a volume mapping, or apply a new routing configuration. Existing routing remains unchanged. The next stage will save the verified input, device pairing, usable range, and mapping in the separate calibration JSON.
+
 ## Third-party code
 
 YamahaRemote includes Windows Mica integration code inspired by

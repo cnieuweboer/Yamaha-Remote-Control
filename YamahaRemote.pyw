@@ -11,6 +11,7 @@ import sys
 import time
 import threading
 import traceback
+import tempfile
 from collections import deque
 from decimal import Decimal
 from pathlib import Path
@@ -150,6 +151,139 @@ class AmplifierServer(QObject):
 
 
 # ----------------------------
+# Exclusive calibration sessions (generic role-local protocol)
+# ----------------------------
+
+
+class CalibrationServer(QObject):
+    """A socket-owned, expiring lease. No device I/O in protocol callbacks."""
+
+    def __init__(self, role, snapshot, changed, perform, parent=None):
+        super().__init__(parent)
+        self.snapshot, self.changed, self.perform = snapshot, changed, perform
+        self.owner = None
+        self.token = None
+        self.busy = False
+        self.sockets = {}
+        self.name = IPC_SERVER_NAME.replace(".amplifier.v1.", f".{role}.calibration.v1.")
+        self.lock = QLockFile(str(Path(tempfile.gettempdir()) / (self.name + ".lock")))
+        self.lock.setStaleLockTime(0)
+        self.server = QLocalServer(self)
+        self.server.setSocketOptions(QLocalServer.UserAccessOption)
+        self.server.setMaxPendingConnections(4)
+        self.lease = QTimer(self)
+        self.lease.setSingleShot(True)
+        self.lease.setInterval(8000)
+        self.lease.timeout.connect(self._expire)
+        self.available = self.lock.tryLock(0)
+        if self.available:
+            QLocalServer.removeServer(self.name)
+            self.available = self.server.listen(self.name)
+            if not self.available:
+                self.lock.unlock()
+        self.server.newConnection.connect(self._accept)
+
+    @property
+    def active(self):
+        return self.owner is not None
+
+    def _accept(self):
+        while self.server.hasPendingConnections():
+            socket = self.server.nextPendingConnection()
+            if len(self.sockets) >= 4:
+                socket.abort()
+                socket.deleteLater()
+                continue
+            socket.setReadBufferSize(IPC_MAX_FRAME + 1)
+            self.sockets[socket] = bytearray()
+            socket.readyRead.connect(lambda socket=socket: self._read(socket))
+            socket.disconnected.connect(lambda socket=socket: self._lost(socket))
+            self._send(socket, self.snapshot())
+
+    def _send(self, socket, message):
+        if socket not in self.sockets:
+            return
+        if socket.bytesToWrite() > IPC_MAX_FRAME * 4:
+            socket.abort()
+        else:
+            socket.write(_ipc_encode(message))
+
+    def _reply(self, socket, request_id, ok, error=""):
+        self._send(socket, {"version": 1, "type": "result", "id": request_id,
+                            "ok": bool(ok), "error": str(error)[:200]})
+
+    def _read(self, socket):
+        try:
+            for message in _ipc_frames(socket, self.sockets[socket]):
+                request_id, action, token = (message.get(key) for key in ("id", "action", "token"))
+                if (message.get("type") != "calibration" or type(request_id) is not int
+                        or not isinstance(action, str) or not isinstance(token, str)
+                        or not 16 <= len(token) <= 80 or not isinstance(message.get("args", {}), dict)):
+                    raise ValueError("Invalid calibration request")
+                if action == "acquire":
+                    if self.active:
+                        self._reply(socket, request_id, False, "Another calibration session is active.")
+                        continue
+                    self.owner, self.token = socket, token
+                    self.lease.start()
+                    self.changed(True)
+                elif socket is not self.owner or token != self.token:
+                    self._reply(socket, request_id, False, "Calibration session is not owned by this connection.")
+                    continue
+                if action == "renew":
+                    self.lease.start()
+                    self._reply(socket, request_id, True)
+                    continue
+                if action == "release":
+                    if self.busy:
+                        self._reply(socket, request_id, False, "A device operation is still running.")
+                    else:
+                        self._expire()
+                        self._reply(socket, request_id, True)
+                    continue
+                if self.busy:
+                    self._reply(socket, request_id, False, "A device operation is still running.")
+                    continue
+                self.busy = True
+                def done(ok, error="", socket=socket, request_id=request_id, token=token, action=action):
+                    if socket is self.owner and token == self.token:
+                        self.busy = False
+                        self._reply(socket, request_id, ok, error)
+                        if action == "acquire" and not ok:
+                            self._expire()
+                self.perform(action, message.get("args", {}), done)
+        except (ValueError, UnicodeError, KeyError):
+            socket.abort()
+
+    def publish(self):
+        state = self.snapshot()
+        for socket in list(self.sockets):
+            self._send(socket, state)
+
+    def _expire(self):
+        was_active = self.active
+        self.owner = self.token = None
+        self.busy = False
+        self.lease.stop()
+        if was_active:
+            self.changed(False)
+
+    def _lost(self, socket):
+        if socket is self.owner:
+            self._expire()
+        if socket in self.sockets:
+            del self.sockets[socket]
+            socket.deleteLater()
+
+    def close(self):
+        self._expire()
+        for socket in list(self.sockets):
+            socket.abort()
+        self.server.close()
+        self.lock.unlock()
+
+
+# ----------------------------
 # Application constants
 # ----------------------------
 
@@ -157,7 +291,7 @@ class AmplifierServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.18.4"
+__version__ = "2026.10.18.5"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -1410,6 +1544,11 @@ class YamahaRemote(QWidget):
     def __init__(self, config):
         super().__init__()
         self.config = config
+        self.calibration_active = False
+        self._calibration_operation = False
+        self._status_sequence = 0
+        self._status_observed_at = 0
+        self.calibration_server = None
         self.mica_enabled = bool(config["Mica"] and supports_mica())
         self.api = YamahaApi(config["Host"], config)
         self.pool = QThreadPool(self)
@@ -1450,8 +1589,76 @@ class YamahaRemote(QWidget):
         self._setup_tray()
         self._setup_hotkeys()
         self._setup_ipc()
+        self._setup_calibration()
         self.set_controls_enabled(False)
         QTimer.singleShot(0, self.initialize)
+
+    def _setup_calibration(self):
+        if self.calibration_server is not None:
+            self.calibration_server.deleteLater()
+        self.calibration_server = CalibrationServer(
+            "amplifier", self._calibration_snapshot, self._calibration_changed,
+            self._calibration_perform, self,
+        )
+
+    def _calibration_snapshot(self):
+        state = self._amplifier_snapshot()
+        state.update(sample_id=self._status_sequence, role="amplifier")
+        state.update(calibration_active=self.calibration_active,
+                     device_id=hashlib.sha256(self.config["Host"].casefold().encode()).hexdigest())
+        return state
+
+    def _calibration_changed(self, active):
+        self.calibration_active = active
+        self.setEnabled(not active)
+        self.poll_timer.setInterval(250 if active else POLL_INTERVAL_MS)
+        with self._hotkey_lock:
+            self._calibration_key_blocked = active
+            self._pending_hotkeys.clear()
+        self._publish_hotkey_state()
+        self._update_polling_state(refresh=True)
+
+    def _calibration_perform(self, action, args, done):
+        if self._shutting_down or missing_config_settings(self.config):
+            done(False, "Device configuration is missing or the app is shutting down.")
+            return
+        if action not in ("acquire", "set_mute", "set_volume"):
+            done(False, "Unsupported calibration operation.")
+            return
+        if action == "set_volume":
+            done(False, "Calibration changes volume through the TV only.")
+            return
+        if (action == "acquire" and sys.platform == "win32"
+                and (self._native_volume_hook is None or not self._native_volume_hook.installed)):
+            done(False, "The amplifier's native volume hook must be available for calibration.")
+            return
+        if action == "set_mute" and type(args.get("value")) is not bool:
+            done(False, "Mute must be true or false.")
+            return
+        self._calibration_operation = True
+        token = self.calibration_server.token
+        deadline = time.monotonic() + 5
+        def finish(ok, error=""):
+            self._calibration_operation = False
+            done(ok, error)
+            self._update_polling_state(refresh=True)
+        def ready():
+            if self._shutting_down or self.calibration_server.token != token:
+                finish(False, "Calibration session ended.")
+                return
+            if self._workers or self.pool.activeThreadCount():
+                if time.monotonic() >= deadline:
+                    finish(False, "Device requests did not finish in time.")
+                else:
+                    QTimer.singleShot(25, ready)
+                return
+            if action == "acquire":
+                finish(True)
+                return
+            function = (lambda: self.api.set_mute(args["value"])) if action == "set_mute" else (lambda: self.api.set_volume(args["value"]))
+            self.run_worker(function, on_result=lambda _: finish(True),
+                            on_error=lambda error: finish(False, f"{type(error).__name__}: {error}"))
+        ready()
 
     def _setup_timers(self):
         self.poll_timer = QTimer(self)
@@ -1759,7 +1966,7 @@ class YamahaRemote(QWidget):
         self.pool.start(worker)
 
     def run_action(self, action, *, background=False):
-        if self._shutting_down:
+        if self._shutting_down or self.calibration_active:
             return False
 
         if self.action_running or not self.connected:
@@ -1889,7 +2096,7 @@ class YamahaRemote(QWidget):
         if not self._should_poll():
             return
 
-        if self.poll_running or self.action_running:
+        if self.poll_running or self.action_running or self._calibration_operation:
             return
 
         self.poll_running = True
@@ -1904,6 +2111,8 @@ class YamahaRemote(QWidget):
             self.connected = True
             self.power_button.setToolTip("")
             self.last_status = status
+            self._status_sequence += 1
+            self._status_observed_at = observed_at
             self._last_status_at = observed_at
             self._publish_hotkey_state()
             self.show_cached_status()
@@ -1927,7 +2136,7 @@ class YamahaRemote(QWidget):
         return bool(
             not self._shutting_down and self._polling_initialized
             and not missing_config_settings(self.config)
-            and ((self.isVisible() and not self.isMinimized()) or background_control
+            and ((self.isVisible() and not self.isMinimized()) or background_control or self.calibration_active
                  or bool(getattr(self, "amplifier_server", None) and self.amplifier_server.clients))
         )
 
@@ -2153,10 +2362,11 @@ class YamahaRemote(QWidget):
                 "mute": status.get("mute") if type(status.get("mute")) is bool else None,
                 "global_hotkeys_enabled": self.config["GlobalVolumeHotkeys"],
                 "global_hotkeys_active": self.global_volume_hotkeys_active,
+                "calibration_active": self.calibration_active,
                 "valid_for_ms": valid_for if self.connected and not self._shutting_down else 0}
 
     def _accept_ipc_command(self, command, expected_input):
-        if (not expected_input or not self._volume_hotkeys_eligible()
+        if (self.calibration_active or not expected_input or not self._volume_hotkeys_eligible()
                 or self.last_status.get("input") != expected_input
                 or QApplication.activeModalWidget() is not None):
             return False
@@ -2191,12 +2401,12 @@ class YamahaRemote(QWidget):
 
     @property
     def global_volume_hotkeys_active(self):
-        return bool(
+        return bool(self.calibration_active or (
             self.config["GlobalVolumeHotkeys"]
             and self._native_volume_hook is not None and self._native_volume_hook.installed
             and self._volume_hotkeys_eligible()
             and QApplication.activeModalWidget() is None
-        )
+        ))
 
     def _publish_hotkey_state(self):
         # The native hook thread reads only this plain-Python snapshot. Qt
@@ -2214,6 +2424,8 @@ class YamahaRemote(QWidget):
                 self._pending_hotkeys.clear()
         if hasattr(self, "amplifier_server"):
             self.amplifier_server.publish()
+        if self.calibration_server is not None:
+            self.calibration_server.publish()
 
     def _refresh_hotkey_state(self):
         self._hotkey_state_refresh_pending = False
@@ -2222,6 +2434,8 @@ class YamahaRemote(QWidget):
 
     def _accept_native_hotkey(self, command, foreground):
         with self._hotkey_lock:
+            if getattr(self, "_calibration_key_blocked", False):
+                return command in _VOLUME_KEYS.values()
             eligible, global_mode, window, observed_at, blocked = self._hotkey_state
             if (command not in _VOLUME_KEYS.values() or not eligible or blocked or observed_at is None
                     or time.monotonic() - observed_at > HOTKEY_STATE_MAX_AGE_SECONDS
@@ -2244,6 +2458,8 @@ class YamahaRemote(QWidget):
         return True
 
     def _accept_focused_hotkey(self, command):
+        if self.calibration_active:
+            return command in _VOLUME_KEYS.values()
         if (command not in _VOLUME_KEYS.values() or not self.isActiveWindow()
                 or QApplication.activeModalWidget() is not None
                 or not self._volume_hotkeys_eligible()):
@@ -2355,6 +2571,9 @@ class YamahaRemote(QWidget):
         self.config_restart_timer.start()
 
     def _check_external_config_change(self):
+        if self.calibration_active:
+            self.config_restart_timer.start(1000)
+            return
         if self._shutting_down or self._config_restart_pending:
             return
         self._watch_config_paths()
@@ -2390,6 +2609,10 @@ class YamahaRemote(QWidget):
         self._watch_config_paths()
 
     def _restart_for_config_change(self):
+        if self.calibration_active:
+            self._config_restart_pending = False
+            self.config_restart_timer.start(1000)
+            return
         if self._shutting_down or self._config_restart_pending:
             return
         self._config_restart_pending = True
@@ -2476,6 +2699,8 @@ class YamahaRemote(QWidget):
 
     def _pause_background_work(self):
         self._shutting_down = True
+        if self.calibration_server is not None:
+            self.calibration_server.close()
         self._publish_hotkey_state()
         self.amplifier_server.close()
         self._qt_volume_keys.pressed.clear()
@@ -2495,6 +2720,7 @@ class YamahaRemote(QWidget):
 
     def _resume_background_work(self, active_timers):
         self._shutting_down = False
+        self._setup_calibration()
         self._config_restart_pending = False
         self._setup_ipc()
         self._publish_hotkey_state()
