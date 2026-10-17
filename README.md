@@ -84,9 +84,11 @@ Regular status polling pauses while the window is hidden or minimized and refres
 
 ## Volume hotkeys
 
+Version `2026.10.18.4` keeps eligible volume keys owned by the amplifier even when its command queue is full, fixing occasional Windows volume changes during fast wheel scrolling. This applies to both focused and global control. Standby, offline, stale state, modal dialogs, and unfocused operation with global control disabled still release new presses normally.
+
 Only Volume Up, Volume Down, and Mute are handled. Other media keys retain their normal behavior. These keys control the amplifier only when it is reachable, powered on, and its last confirmed status is no more than six seconds old. Otherwise, new keypresses pass through normally; hotkeys never wake the amplifier. Global keys target the amplifier regardless of its selected input.
 
-Windows uses a dedicated keyboard-hook thread and queues requests to the existing serialized device worker. Key handling does not wait for network requests. Mute toggles once per physical press, while holding Volume Up or Volume Down repeats. A small bounded queue prevents an unbounded delayed volume ramp; excess repeats are ignored when full, and new presses that cannot be accepted pass through. A press already claimed remains claimed until release, even if availability changes during that press. Remapped keys are supported when Windows exposes them as volume-key events.
+Windows uses a dedicated keyboard-hook thread and queues requests to the existing serialized device worker. Key handling does not wait for network requests. Mute toggles once per physical press, while holding Volume Up or Volume Down repeats. A small bounded queue prevents an unbounded delayed volume ramp; excess repeats and new presses are consumed without queueing when full. This keeps fast volume-wheel bursts from changing Windows volume while the amplifier owns those keys. A press already claimed remains claimed until release, even if availability changes during that press. Remapped keys are supported when Windows exposes them as volume-key events.
 
 On macOS and Linux, focused-window Qt shortcuts are available; global interception is Windows-only. If Windows hook installation fails, the app reports it and stays usable; focused Qt fallback may depend on the desktop's media-key handling. Modal dialogs temporarily suspend new hotkey commands. Hotkey request failures update the remote's status without opening a dialog over another application.
 

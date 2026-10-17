@@ -157,7 +157,7 @@ class AmplifierServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.18.2"
+__version__ = "2026.10.18.4"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -2223,11 +2223,15 @@ class YamahaRemote(QWidget):
     def _accept_native_hotkey(self, command, foreground):
         with self._hotkey_lock:
             eligible, global_mode, window, observed_at, blocked = self._hotkey_state
-            if (not eligible or blocked or observed_at is None
+            if (command not in _VOLUME_KEYS.values() or not eligible or blocked or observed_at is None
                     or time.monotonic() - observed_at > HOTKEY_STATE_MAX_AGE_SECONDS
                     or (not global_mode and (not window or foreground != window))):
                 return False
-            return self._enqueue_hotkey_locked(command)
+            # Ownership depends on eligibility, not worker capacity. A wheel
+            # emits distinct presses; forwarding overflow would alter Windows
+            # volume while the rest of the same burst controls the amplifier.
+            self._enqueue_hotkey_locked(command)
+            return True
 
     def _enqueue_hotkey_locked(self, command):
         key_command = command[0] if isinstance(command, tuple) else command
@@ -2240,11 +2244,13 @@ class YamahaRemote(QWidget):
         return True
 
     def _accept_focused_hotkey(self, command):
-        if (not self.isActiveWindow() or QApplication.activeModalWidget() is not None
+        if (command not in _VOLUME_KEYS.values() or not self.isActiveWindow()
+                or QApplication.activeModalWidget() is not None
                 or not self._volume_hotkeys_eligible()):
             return False
         with self._hotkey_lock:
-            return self._enqueue_hotkey_locked(command)
+            self._enqueue_hotkey_locked(command)
+            return True
 
     def _schedule_hotkey_drain(self):
         with self._hotkey_lock:
