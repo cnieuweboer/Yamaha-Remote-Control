@@ -79,7 +79,7 @@ means that a volume value of `100` is displayed as `-47.0 dB`.
 
 The app automatically restart when it detects the json file is changed.
 
-Regular status polling pauses while the window is hidden or minimized and refreshes immediately when restored, unless Windows global volume hotkeys are enabled and their hook is installed. In that case, the existing polling timer continues while hidden, including in standby or offline, so external power changes and reconnections can be detected. Active requests finish normally; configuration file watching remains enabled.
+Regular status polling pauses while the window is hidden or minimized and refreshes immediately when restored, unless Windows global volume hotkeys are enabled and their hook is installed, or a local TV remote is connected through IPC. In that case, the existing polling timer continues while hidden, including in standby or offline, so external power changes and reconnections can be detected. Active requests finish normally; configuration file watching remains enabled.
 
 
 ## Volume hotkeys
@@ -90,7 +90,19 @@ Windows uses a dedicated keyboard-hook thread and queues requests to the existin
 
 On macOS and Linux, focused-window Qt shortcuts are available; global interception is Windows-only. If Windows hook installation fails, the app reports it and stays usable; focused Qt fallback may depend on the desktop's media-key handling. Modal dialogs temporarily suspend new hotkey commands. Hotkey request failures update the remote's status without opening a dialog over another application.
 
-The app tracks whether global ownership is actually active separately from the JSON preference, for the later IPC integration. Sony Remote coordination is not part of this release, so avoid relying on both apps' volume shortcuts simultaneously until that step is implemented.
+The app publishes both the configured global-hotkey preference and actual ownership. Sony Remote defers its focused volume/mute shortcuts only while actual global ownership is active; standby, offline, stale state, hook failure, and modal dialogs release ownership.
+
+## Local amplifier connection
+
+Version `2026.10.18.2` adds optional cooperation with Sony Remote of the same version. No additional files or dependencies are needed. Both scripts remain self-contained and neither reads the other app's configuration.
+
+Yamaha Remote publishes state over a user-local Qt socket automatically. Configure `AmplifierTVInput` in Sony Remote with the amplifier's exact input ID, such as `hdmi1`, `optical1`, or `tv`. Use the keys under Yamaha Remote's `Inputs` setting, rather than a display name or `NameOverride`. Sony routes its volume buttons, mute button, and focused volume keys to the amplifier only while its fresh state says it is on and using that input. Global Yamaha hotkeys continue to target the amplifier on every input.
+
+The existing two-second device polling continues while a TV client is connected, including when the amplifier window is hidden, minimized, in standby, or offline. IPC itself does not poll device state. If both global control and connected clients are absent, hidden-window polling pauses again.
+
+The generic `remote-control.amplifier.v1.<user-suffix>` endpoint uses `QLocalServer` / `QLocalSocket` with user-only access, a role lock, versioned newline-delimited JSON, bounded frames, and bounded command queues. State messages carry `online`, `power`, `input`, `raw_volume`, `raw_max_volume`, `mute`, `global_hotkeys_enabled`, `global_hotkeys_active`, and a remaining freshness lease in `valid_for_ms`. Status freshness is measured from the device response, not socket delivery. Commands are limited to `volume_up`, `volume_down`, and `mute`, and include the expected amplifier input. Input and availability are checked before queueing and again before execution. Acknowledgements confirm queue acceptance; later device failures follow the amplifier's normal background error handling.
+
+`raw_max_volume` describes the network control interface's ceiling, not the amplifier's physical maximum. No TV-scale conversion, volume-setting synchronization back to the TV, or calibration is performed in this release. Sony displays the amplifier's raw value while routing, with a source tooltip. Two-point calibration, caps, and alternative mappings remain a later step.
 
 ## Third-party code
 

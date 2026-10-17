@@ -18,6 +18,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import urlopen
 from PySide6.QtCore import QEvent, QFileInfo, QFileSystemWatcher, QObject, QLockFile, QProcess, QRunnable, QStandardPaths, QThreadPool, QTimer, Qt, Signal
+from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtGui import QAction, QColor, QIcon, QPalette
 from PySide6.QtWidgets import (
     QApplication,
@@ -35,6 +36,120 @@ from PySide6.QtWidgets import (
 
 
 # ----------------------------
+# Local amplifier protocol (newline-delimited JSON, version 1)
+# ----------------------------
+
+
+IPC_SERVER_NAME = "remote-control.amplifier.v1." + hashlib.sha256(
+    str(Path.home()).encode("utf-8")
+).hexdigest()[:16]
+IPC_MAX_FRAME = 4096
+
+
+def _ipc_encode(message):
+    return (json.dumps(message, allow_nan=False, separators=(",", ":")) + "\n").encode("utf-8")
+
+
+def _ipc_frames(socket, buffer):
+    # Bound reads even if another local process sends an oversized frame.
+    buffer.extend(bytes(socket.read(IPC_MAX_FRAME + 1)))
+    messages = []
+    while b"\n" in buffer:
+        frame, _, tail = buffer.partition(b"\n")
+        buffer[:] = tail
+        if len(frame) > IPC_MAX_FRAME:
+            raise ValueError("Local protocol frame too large")
+        try:
+            message = json.loads(frame)
+        except RecursionError as error:
+            raise ValueError("Local protocol nesting too deep") from error
+        if (not isinstance(message, dict) or type(message.get("version")) is not int
+                or message["version"] != 1):
+            raise ValueError("Unsupported local protocol message")
+        messages.append(message)
+    if len(buffer) > IPC_MAX_FRAME:
+        raise ValueError("Local protocol frame too large")
+    return messages
+
+
+class AmplifierServer(QObject):
+    """User-local state publisher and bounded command receiver; no device polling."""
+
+    def __init__(self, snapshot, command, changed, parent=None):
+        super().__init__(parent)
+        self.snapshot = snapshot
+        self.command = command
+        self.changed = changed
+        self.clients = {}
+        self.server = QLocalServer(self)
+        self.server.setSocketOptions(QLocalServer.UserAccessOption)
+        self.server.setMaxPendingConnections(8)
+        # Only the role-lock owner may remove a socket left by a crashed process.
+        self.lock = QLockFile(str(Path(QStandardPaths.writableLocation(
+            QStandardPaths.TempLocation)) / (IPC_SERVER_NAME + ".lock")))
+        self.lock.setStaleLockTime(0)
+        self.available = self.lock.tryLock(0)
+        if self.available:
+            QLocalServer.removeServer(IPC_SERVER_NAME)
+            self.available = self.server.listen(IPC_SERVER_NAME)
+            if not self.available:
+                self.lock.unlock()
+        self.server.newConnection.connect(self._accept)
+
+    def _accept(self):
+        while self.server.hasPendingConnections():
+            socket = self.server.nextPendingConnection()
+            if len(self.clients) >= 8:
+                socket.abort()
+                socket.deleteLater()
+                continue
+            socket.setReadBufferSize(IPC_MAX_FRAME + 1)
+            self.clients[socket] = bytearray()
+            socket.readyRead.connect(lambda socket=socket: self._read(socket))
+            socket.disconnected.connect(lambda socket=socket: self._remove(socket))
+            self.changed()
+            self._send(socket, self.snapshot())
+
+    def _remove(self, socket):
+        if socket in self.clients:
+            del self.clients[socket]
+            socket.deleteLater()
+            self.changed()
+
+    def _send(self, socket, message):
+        if socket.bytesToWrite() > IPC_MAX_FRAME * 4:
+            socket.abort()
+            return
+        socket.write(_ipc_encode(message))
+
+    def _read(self, socket):
+        try:
+            for message in _ipc_frames(socket, self.clients[socket]):
+                if (message.get("type") != "command"
+                        or type(message.get("id")) is not int
+                        or not isinstance(message.get("input"), str)
+                        or message.get("command") not in ("volume_up", "volume_down", "mute")):
+                    raise ValueError("Invalid local command")
+                accepted = self.command(message["command"], message["input"])
+                self._send(socket, {"version": 1, "type": "ack", "id": message["id"],
+                                    "accepted": accepted})
+        except (ValueError, UnicodeError, KeyError):
+            socket.abort()
+
+    def publish(self):
+        message = self.snapshot()
+        for socket in list(self.clients):
+            self._send(socket, message)
+
+    def close(self):
+        self.available = False
+        for socket in list(self.clients):
+            socket.abort()
+        self.server.close()
+        self.lock.unlock()
+
+
+# ----------------------------
 # Application constants
 # ----------------------------
 
@@ -42,7 +157,7 @@ from PySide6.QtWidgets import (
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.18.1"
+__version__ = "2026.10.18.2"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -1334,6 +1449,7 @@ class YamahaRemote(QWidget):
         self._setup_config_watcher()
         self._setup_tray()
         self._setup_hotkeys()
+        self._setup_ipc()
         self.set_controls_enabled(False)
         QTimer.singleShot(0, self.initialize)
 
@@ -1811,7 +1927,8 @@ class YamahaRemote(QWidget):
         return bool(
             not self._shutting_down and self._polling_initialized
             and not missing_config_settings(self.config)
-            and ((self.isVisible() and not self.isMinimized()) or background_control)
+            and ((self.isVisible() and not self.isMinimized()) or background_control
+                 or bool(getattr(self, "amplifier_server", None) and self.amplifier_server.clients))
         )
 
 
@@ -2008,8 +2125,43 @@ class YamahaRemote(QWidget):
 
 
     # ----------------------------
-    # Volume hotkeys
+    # Local amplifier state and volume hotkeys
     # ----------------------------
+
+    def _setup_ipc(self):
+        if hasattr(self, "amplifier_server"):
+            self.amplifier_server.deleteLater()
+        self.amplifier_server = AmplifierServer(
+            self._amplifier_snapshot, self._accept_ipc_command,
+            lambda: self._update_polling_state(refresh=True), self,
+        )
+        if not self.amplifier_server.available:
+            record_exception(RuntimeError("Local amplifier endpoint unavailable"), "Local amplifier IPC")
+
+    def _amplifier_snapshot(self):
+        status = self.last_status or {}
+        age = time.monotonic() - self._last_status_at if self._last_status_at is not None else 6
+        valid_for = max(0, min(6000, int((6 - age) * 1000)))
+        def raw(key):
+            value = status.get(key)
+            return value if type(value) in (int, float) and math.isfinite(value) else None
+        return {"version": 1, "type": "state", "online": bool(self.connected and not self._shutting_down),
+                "power": status.get("power") if status.get("power") in ("on", "standby") else None,
+                "input": status.get("input") if isinstance(status.get("input"), str) else None,
+                "raw_volume": raw("volume"),
+                "raw_max_volume": raw("max_volume"),
+                "mute": status.get("mute") if type(status.get("mute")) is bool else None,
+                "global_hotkeys_enabled": self.config["GlobalVolumeHotkeys"],
+                "global_hotkeys_active": self.global_volume_hotkeys_active,
+                "valid_for_ms": valid_for if self.connected and not self._shutting_down else 0}
+
+    def _accept_ipc_command(self, command, expected_input):
+        if (not expected_input or not self._volume_hotkeys_eligible()
+                or self.last_status.get("input") != expected_input
+                or QApplication.activeModalWidget() is not None):
+            return False
+        with self._hotkey_lock:
+            return self._enqueue_hotkey_locked((command, expected_input))
 
     def _native_hotkey_changed(self, installed, error):
         if self._shutting_down:
@@ -2060,6 +2212,8 @@ class YamahaRemote(QWidget):
             self._hotkey_state = state
             if not state[0]:
                 self._pending_hotkeys.clear()
+        if hasattr(self, "amplifier_server"):
+            self.amplifier_server.publish()
 
     def _refresh_hotkey_state(self):
         self._hotkey_state_refresh_pending = False
@@ -2076,7 +2230,8 @@ class YamahaRemote(QWidget):
             return self._enqueue_hotkey_locked(command)
 
     def _enqueue_hotkey_locked(self, command):
-        if command not in _VOLUME_KEYS.values() or len(self._pending_hotkeys) >= MAX_PENDING_HOTKEYS:
+        key_command = command[0] if isinstance(command, tuple) else command
+        if key_command not in _VOLUME_KEYS.values() or len(self._pending_hotkeys) >= MAX_PENDING_HOTKEYS:
             return False
         self._pending_hotkeys.append(command)
         if not self._hotkey_drain_scheduled:
@@ -2106,6 +2261,11 @@ class YamahaRemote(QWidget):
             if self.action_running or self.poll_running or not self._pending_hotkeys:
                 return
             command = self._pending_hotkeys.popleft()
+        if isinstance(command, tuple):
+            command, expected_input = command
+            if self.last_status.get("input") != expected_input:
+                self._schedule_hotkey_drain()
+                return
         if command == "mute":
             self.toggle_mute(background=True)
         else:
@@ -2311,6 +2471,7 @@ class YamahaRemote(QWidget):
     def _pause_background_work(self):
         self._shutting_down = True
         self._publish_hotkey_state()
+        self.amplifier_server.close()
         self._qt_volume_keys.pressed.clear()
         self._worker_generation += 1
         timers = (self.poll_timer, self.startup_status_timer, self.config_restart_timer)
@@ -2329,6 +2490,7 @@ class YamahaRemote(QWidget):
     def _resume_background_work(self, active_timers):
         self._shutting_down = False
         self._config_restart_pending = False
+        self._setup_ipc()
         self._publish_hotkey_state()
         self.config_watcher.blockSignals(False)
         self._watch_config_paths()
@@ -2350,6 +2512,7 @@ class YamahaRemote(QWidget):
             self._native_volume_hook.stop()
         if self.tray is not None:
             self.tray.hide()
+        self.amplifier_server.close()
         release_single_instance()
 
     # ----------------------------
