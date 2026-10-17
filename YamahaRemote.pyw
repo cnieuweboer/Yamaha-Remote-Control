@@ -1,4 +1,6 @@
 import ctypes
+from datetime import datetime
+import faulthandler
 import hashlib
 import ipaddress
 import json
@@ -7,13 +9,14 @@ import os
 import re
 import sys
 import time
+import threading
+import traceback
 from decimal import Decimal
 from pathlib import Path
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import urlopen
-
-from PySide6.QtCore import QFileInfo, QFileSystemWatcher, QObject, QLockFile, QProcess, QRunnable, QStandardPaths, QThreadPool, QTimer, Qt, Signal
+from PySide6.QtCore import QEvent, QFileInfo, QFileSystemWatcher, QObject, QLockFile, QProcess, QRunnable, QStandardPaths, QThreadPool, QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QColor, QIcon, QPalette
 from PySide6.QtWidgets import (
     QApplication,
@@ -29,11 +32,48 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+
 # ----------------------------
-# Config
+# Application constants
 # ----------------------------
 
-CONFIG_FILE = "YamahaRemote.json"
+
+APP_NAME = "Yamaha Remote"
+
+
+__version__ = "2026.10.17.7"
+
+
+CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
+
+
+NETWORK_TIMEOUT_SECONDS = 2.0
+
+
+POLL_INTERVAL_MS = 2000
+
+
+CONFIG_RESTART_DEBOUNCE_MS = 200
+
+
+# ----------------------------
+# Configuration
+# ----------------------------
+
+
+DEFAULT_CONFIG = {
+    "Host": "",
+    "DarkMode": True,
+    "Mica": False,
+    "VolumeDb": False,
+    "VolumeDbAtZero": -97.0,
+    "VolumeDbStepSize": 0.5,
+    "DiagnosticsEnabled": False,
+    "SortByName": False,
+    "Inputs": {},
+    "SystemTray": False,
+    "CloseToTray": False,
+}
 
 
 class ConfigError(ValueError):
@@ -85,9 +125,7 @@ def _validate_host(value):
     host = value.strip()
 
     if not host:
-        raise ConfigError(
-            '"Host" must not be empty.'
-        )
+        return host
 
     try:
         ipaddress.ip_address(host)
@@ -116,10 +154,10 @@ def _validate_host(value):
     return host
 
 
-def _validate_inputs(value):
+def _validate_entries(value, collection):
     if not isinstance(value, dict):
         raise ConfigError(
-            '"Inputs" must be an object.'
+            f'"{collection}" must be an object.'
         )
 
     normalized = {}
@@ -127,14 +165,14 @@ def _validate_inputs(value):
     for input_id, settings in value.items():
         if not isinstance(input_id, str) or not input_id.strip():
             raise ConfigError(
-                '"Inputs" input IDs must be non-empty strings.'
+                f'"{collection}" IDs must be non-empty strings.'
             )
 
         input_id = input_id.strip()
 
         if not isinstance(settings, dict):
             raise ConfigError(
-                f'"Inputs" entry {input_id!r} must be an object.'
+                f'"{collection}" entry {input_id!r} must be an object.'
             )
 
         unknown_keys = set(settings) - {
@@ -147,36 +185,36 @@ def _validate_inputs(value):
         if unknown_keys:
             names = ", ".join(sorted(unknown_keys))
             raise ConfigError(
-                f'"Inputs" entry {input_id!r} has unknown '
+                f'"{collection}" entry {input_id!r} has unknown '
                 f'field(s): {names}.'
             )
 
-        name = settings.get("Name")
+        name = settings.get("Name", input_id)
         name_override = settings.get("NameOverride", "")
         hidden = settings.get("Hidden", False)
         favorite = settings.get("Favorite", False)
 
         if not isinstance(name, str) or not name.strip():
             raise ConfigError(
-                f'"Inputs" entry {input_id!r} must have a '
+                f'"{collection}" entry {input_id!r} must have a '
                 'non-empty string "Name".'
             )
 
         if not isinstance(name_override, str):
             raise ConfigError(
-                f'"Inputs" entry {input_id!r} "NameOverride" '
+                f'"{collection}" entry {input_id!r} "NameOverride" '
                 'must be a string.'
             )
 
         if not isinstance(hidden, bool):
             raise ConfigError(
-                f'"Inputs" entry {input_id!r} "Hidden" '
+                f'"{collection}" entry {input_id!r} "Hidden" '
                 'must be true or false.'
             )
 
         if not isinstance(favorite, bool):
             raise ConfigError(
-                f'"Inputs" entry {input_id!r} "Favorite" '
+                f'"{collection}" entry {input_id!r} "Favorite" '
                 'must be true or false.'
             )
 
@@ -190,17 +228,51 @@ def _validate_inputs(value):
     return normalized
 
 
-def _input_display_name(settings):
+def _entry_display_name(settings):
     return settings["NameOverride"] or settings["Name"]
 
-def validate_config(raw_config):
+
+def _ordered_entries(entries, sort_by_name):
+    items = list(entries.items())
+    if sort_by_name:
+        items.sort(key=lambda item: _entry_display_name(item[1]).casefold())
+    return items
+
+
+def _default_config_copy():
+    return {
+        key: value.copy() if isinstance(value, (dict, list)) else value
+        for key, value in DEFAULT_CONFIG.items()
+    }
+
+
+def missing_config_settings(config):
+    return ["Host"] if not config["Host"] else []
+
+
+def show_missing_config_settings(config):
+    missing = missing_config_settings(config)
+    if missing:
+        path = CONFIG_PATH
+        QMessageBox.information(
+            None, "Yamaha Remote - Configuration Required",
+            f"Add the following required settings in {path}: "
+            + ", ".join(missing)
+            + ".\nDevice communication is disabled until you save a valid configuration.",
+        )
+
+
+def validate_config(raw_config, *, allow_incomplete=False):
     if not isinstance(raw_config, dict):
         raise ConfigError(
             "The configuration root must be a JSON object."
         )
 
-    config = dict(raw_config)
+    config = _default_config_copy()
+    config.update(raw_config)
 
+    config["DiagnosticsEnabled"] = _require_bool(config, "DiagnosticsEnabled", False)
+    config["SortByName"] = _require_bool(config, "SortByName", False)
     config["Host"] = _validate_host(
         config.get("Host")
     )
@@ -231,6 +303,8 @@ def validate_config(raw_config):
     )
 
     if config["VolumeDb"]:
+        for key in ("VolumeDbAtZero", "VolumeDbStepSize"):
+            _require_number(raw_config, key)
         config["VolumeDbAtZero"] = _require_number(
             config,
             "VolumeDbAtZero",
@@ -268,11 +342,11 @@ def validate_config(raw_config):
             '"SystemTray" is also true.'
         )
 
-    config["Inputs"] = _validate_inputs(
-        config.get("Inputs", {})
-    )
+    config["Inputs"] = _validate_entries(config.get("Inputs", {}), "Inputs")
 
     allowed_keys = {
+        "DiagnosticsEnabled",
+        "SortByName",
         "Host",
         "DarkMode",
         "Mica",
@@ -293,19 +367,21 @@ def validate_config(raw_config):
             f"{names}."
         )
 
+    if not allow_incomplete and missing_config_settings(config):
+        raise ConfigError('"Host" must not be empty.')
+
     return config
 
 
 def load_config():
     script_path = Path(__file__).resolve()
 
-    config_path = script_path.with_name(CONFIG_FILE)
+    config_path = CONFIG_PATH
 
     if not config_path.exists():
-        raise ConfigError(
-            f"{CONFIG_FILE} was not found next to "
-            f"{script_path.name}."
-        )
+        config = _default_config_copy()
+        save_config(config)
+        return validate_config(config, allow_incomplete=True)
 
     try:
         with config_path.open(
@@ -319,17 +395,19 @@ def load_config():
             f"{config_path.name}: line {ex.lineno}, "
             f"column {ex.colno}: {ex.msg}"
         ) from ex
+    except UnicodeError as ex:
+        raise ConfigError(f"{config_path.name} must use UTF-8 encoding.") from ex
     except OSError as ex:
         raise ConfigError(
             f"Unable to read {config_path.name}: {ex}"
         ) from ex
 
-    return validate_config(raw_config)
+    return validate_config(raw_config, allow_incomplete=True)
 
 
 def save_config(config):
     script_path = Path(__file__).resolve()
-    config_path = script_path.with_name(CONFIG_FILE)
+    config_path = CONFIG_PATH
     temp_path = config_path.with_suffix(config_path.suffix + ".tmp")
 
     try:
@@ -349,7 +427,6 @@ def save_config(config):
         ) from ex
 
 
-
 def _file_sha256(path):
     try:
         return hashlib.sha256(path.read_bytes()).digest()
@@ -361,6 +438,119 @@ def _file_sha256(path):
 # Platform integration
 # ----------------------------
 
+
+_instance_lock = None
+
+
+class _WindowsSingleInstanceMutex:
+    ERROR_ALREADY_EXISTS = 183
+
+    def __init__(self, name):
+        self.handle = None
+        self.kernel32 = None
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=False)
+
+        kernel32.CreateMutexW.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_bool,
+            ctypes.c_wchar_p,
+        ]
+        kernel32.CreateMutexW.restype = ctypes.c_void_p
+
+        kernel32.GetLastError.argtypes = []
+        kernel32.GetLastError.restype = ctypes.c_ulong
+
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle.restype = ctypes.c_bool
+
+        handle = kernel32.CreateMutexW(
+            None,
+            False,
+            name,
+        )
+
+        # GetLastError must be read immediately after CreateMutexW.
+        error = kernel32.GetLastError()
+
+        if not handle:
+            raise OSError(
+                error,
+                "CreateMutexW failed.",
+            )
+
+        if error == self.ERROR_ALREADY_EXISTS:
+            kernel32.CloseHandle(handle)
+            self.handle = None
+            self.kernel32 = None
+            return
+
+        self.handle = handle
+        self.kernel32 = kernel32
+
+    @property
+    def acquired(self):
+        return self.handle is not None
+
+    def close(self):
+        if self.handle is not None:
+            self.kernel32.CloseHandle(self.handle)
+            self.handle = None
+
+    def __del__(self):
+        self.close()
+
+
+def _create_single_instance_lock():
+    if sys.platform == "win32":
+        mutex = _WindowsSingleInstanceMutex(
+            "YamahaRemote.SingleInstance"
+        )
+
+        if not mutex.acquired:
+            return None
+
+        return mutex
+
+    temp_dir = QStandardPaths.writableLocation(
+        QStandardPaths.TempLocation
+    )
+
+    lock_path = str(
+        Path(temp_dir) / "YamahaRemote.lock"
+    )
+
+    lock = QLockFile(lock_path)
+
+    # Disable age-based stale detection for this long-lived lock. QLockFile
+    # can still recover a lock whose owning process no longer exists.
+    lock.setStaleLockTime(0)
+
+    if not lock.tryLock(0):
+        if lock.error() != QLockFile.LockFailedError:
+            raise OSError("Could not create the single-instance lock file.")
+        return None
+
+    return lock
+
+
+def acquire_single_instance():
+    global _instance_lock
+    lock = _create_single_instance_lock()
+    if lock is None:
+        return False
+    _instance_lock = lock
+    return True
+
+
+def release_single_instance():
+    global _instance_lock
+    if isinstance(_instance_lock, _WindowsSingleInstanceMutex):
+        _instance_lock.close()
+    elif isinstance(_instance_lock, QLockFile):
+        _instance_lock.unlock()
+    _instance_lock = None
+
+
 def set_app_user_model_id(app_id):
     if sys.platform != "win32":
         return
@@ -371,16 +561,8 @@ def set_app_user_model_id(app_id):
         pass
 
 
-# ----------------------------
-# Windows Mica integration
-# ----------------------------
-# Copy-paste friendly: this block only depends on the standard-library
-# ``ctypes`` and ``sys`` modules. Pass it a native Windows HWND, for example
-# ``int(widget.winId())`` in PySide6.
-#
-# The Mica implementation is inspired by win32mica (MIT licensed), but uses
-# the documented Windows 11 system-backdrop API on current builds. The legacy
-# attribute is retained only for early Windows 11 builds.
+# Windows Mica integration inspired by win32mica (MIT); see THIRD_PARTY_LICENSES.txt.
+
 
 class _MicaMargins(ctypes.Structure):
     _fields_ = [
@@ -465,7 +647,6 @@ def set_dark_titlebar(hwnd):
     except Exception:
         pass
 
-# End of copy-pasteable Windows Mica integration block.
 
 def get_app_icon():
     if sys.platform != "win32":
@@ -487,10 +668,141 @@ def get_app_icon():
 
 
 # ----------------------------
-# Yamaha communication
+# Request errors and optional diagnostics
 # ----------------------------
 
-class YamahaConnectionError(RuntimeError):
+
+class DeviceConnectionError(RuntimeError):
+    """The device could not be reached."""
+
+
+class DeviceResponseError(RuntimeError):
+    """The device rejected a request or returned an invalid response."""
+
+
+_diagnostics = None
+
+
+class Diagnostics:
+    """Optional, best-effort logs without messages, source lines, or locals."""
+
+    def __init__(self):
+        self._stream = None
+        self._lock = threading.RLock()
+        self._seen = set()
+        self._owns_fault_handler = False
+        self._old_sys_hook = sys.excepthook
+        self._old_thread_hook = threading.excepthook
+        self._sys_hook = self._exception_hook
+        self._thread_hook = self._thread_exception_hook
+        try:
+            self._stream = Path(__file__).with_name(
+                Path(__file__).stem + "-crash.log"
+            ).open("a", encoding="utf-8")
+        except OSError:
+            return
+        sys.excepthook = self._sys_hook
+        threading.excepthook = self._thread_hook
+        try:
+            if not faulthandler.is_enabled():
+                faulthandler.enable(self._stream)
+                self._owns_fault_handler = True
+        except (OSError, RuntimeError, ValueError):
+            pass
+
+    def _format_exception(self, error, context):
+        # Never stringify exceptions: messages and chained causes may contain
+        # credentials, request payloads, or text entered by the user.
+        lines = [f"{context}: {type(error).__name__}"]
+        visited = set()
+        while error is not None and id(error) not in visited:
+            visited.add(id(error))
+            lines.append(f"Exception type: {type(error).__name__}")
+            for frame, line in traceback.walk_tb(error.__traceback__):
+                lines.append(
+                    f"  {Path(frame.f_code.co_filename).name}:{line} in {frame.f_code.co_name}"
+                )
+            error = error.__cause__ or (
+                None if error.__suppress_context__ else error.__context__
+            )
+        return "\n".join(lines) + "\n"
+
+    def record(self, error, context, *, deduplicate=False):
+        with self._lock:
+            if self._stream is None:
+                return
+            text = self._format_exception(error, context)
+            if deduplicate and text in self._seen:
+                return
+            if deduplicate:
+                self._seen.add(text)
+            try:
+                timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+                self._stream.write(f"\n[{timestamp}] {Path(__file__).stem} {__version__}\n{text}")
+                self._stream.flush()
+            except (OSError, ValueError):
+                self.close()
+
+    def _exception_hook(self, exc_type, error, tb):
+        self.record(error, "Unhandled exception")
+        try:
+            sys.stderr.write(self._format_exception(error, "Unhandled exception"))
+        except (OSError, ValueError, AttributeError):
+            pass
+
+    def _thread_exception_hook(self, args):
+        self._exception_hook(args.exc_type, args.exc_value, args.exc_traceback)
+
+    def close(self):
+        with self._lock:
+            if sys.excepthook is self._sys_hook:
+                sys.excepthook = self._old_sys_hook
+            if threading.excepthook is self._thread_hook:
+                threading.excepthook = self._old_thread_hook
+            if self._owns_fault_handler:
+                try:
+                    faulthandler.disable()
+                except (OSError, RuntimeError, ValueError):
+                    pass
+                self._owns_fault_handler = False
+            stream, self._stream = self._stream, None
+            if stream is not None:
+                try:
+                    stream.close()
+                except (OSError, ValueError):
+                    pass
+
+
+def configure_diagnostics(config):
+    global _diagnostics
+    close_diagnostics()
+    if config["DiagnosticsEnabled"]:
+        _diagnostics = Diagnostics()
+
+
+def close_diagnostics():
+    global _diagnostics
+    if _diagnostics is not None:
+        _diagnostics.close()
+        _diagnostics = None
+
+
+def record_exception(error, context, *, deduplicate=False):
+    if _diagnostics is not None:
+        _diagnostics.record(error, context, deduplicate=deduplicate)
+
+
+def record_unexpected_exception(error, context, *, background=False):
+    if not isinstance(error, (DeviceConnectionError, DeviceResponseError)):
+        record_exception(error, context, deduplicate=background)
+
+
+# ----------------------------
+# Device API
+# ----------------------------
+
+
+class YamahaConnectionError(DeviceConnectionError):
     """Raised when the Yamaha device cannot be reached."""
 
 
@@ -499,7 +811,7 @@ def _decimal_places(value):
     return max(0, -exponent)
 
 
-class YamahaBackend:
+class YamahaApi:
     def __init__(self, host, config=None):
         self.host = host
         self.config = config or {}
@@ -536,20 +848,22 @@ class YamahaBackend:
                 data = json.loads(
                     response.read().decode("utf-8")
                 )
+        except HTTPError as ex:
+            raise DeviceResponseError(f"Yamaha returned HTTP {ex.code}.") from ex
         except (URLError, TimeoutError, OSError) as ex:
             raise YamahaConnectionError(
                 "Unable to reach the Yamaha."
             ) from ex
+        except (UnicodeError, json.JSONDecodeError) as ex:
+            raise DeviceResponseError("Yamaha returned invalid JSON.") from ex
 
+        if not isinstance(data, dict):
+            raise DeviceResponseError("Yamaha response must be a JSON object.")
         response_code = data.get("response_code")
-        if (
-            response_code is not None
-            and response_code != 0
-        ):
-            raise RuntimeError(
-                "Yamaha returned response code "
-                f"{response_code}."
-            )
+        if isinstance(response_code, bool) or not isinstance(response_code, int):
+            raise DeviceResponseError("Yamaha response has a missing or invalid response code.")
+        if response_code != 0:
+            raise DeviceResponseError(f"Yamaha returned response code {response_code}.")
 
         return data
 
@@ -639,8 +953,8 @@ class YamahaBackend:
 
                 if input_id and text:
                     names[input_id] = text
-        except Exception:
-            pass
+        except Exception as ex:
+            record_unexpected_exception(ex, "Optional input names", background=True)
 
         inputs = []
 
@@ -670,9 +984,6 @@ class YamahaBackend:
                 }
             )
 
-        inputs.sort(
-            key=lambda x: x["Label"].lower()
-        )
         return inputs
 
     def preview_volume(self, volume, direction):
@@ -702,11 +1013,14 @@ class YamahaBackend:
 
 
 # ----------------------------
-# Background work
+# Background workers
 # ----------------------------
 
+
 class WorkerSignals(QObject):
-    completed = Signal(object, object)
+    result = Signal(object)
+    error = Signal(object)
+    finished = Signal()
 
 
 class Worker(QRunnable):
@@ -717,14 +1031,15 @@ class Worker(QRunnable):
 
     def run(self):
         try:
-            result = self.function()
-            self.signals.completed.emit(result, None)
-        except Exception as ex:
-            self.signals.completed.emit(None, ex)
+            self.signals.result.emit(self.function())
+        except Exception as exc:
+            self.signals.error.emit(exc)
+        finally:
+            self.signals.finished.emit()
 
 
 # ----------------------------
-# UI
+# Specialized widgets
 # ----------------------------
 
 
@@ -742,178 +1057,58 @@ class DraggableLabel(QLabel):
         super().mousePressEvent(event)
 
 
+# ----------------------------
+# Main window
+# ----------------------------
+
 
 class YamahaRemote(QWidget):
+
+    # ----------------------------
+    # Initialization
+    # ----------------------------
+
     def __init__(self, config):
         super().__init__()
-
-        self.dark_mode = config["DarkMode"]
-        self.mica_enabled = bool(
-            config["Mica"]
-            and supports_mica()
-        )
-        self.system_tray_enabled = config["SystemTray"]
-        self.close_to_tray = config["CloseToTray"]
-        self.force_exit = False
-        self.tray_icon = None
         self.config = config
-        self.backend = YamahaBackend(config["Host"], config)
-        self.input_settings = config["Inputs"]
-        self.favorite_buttons = {}
-
-        self.last_status = None
-        self.inputs = []
-
-        self.config_path = Path(__file__).resolve().with_name(CONFIG_FILE)
-        self.config_hash = _file_sha256(self.config_path)
-        self.config_restart_pending = False
-
-        self.config_watcher = QFileSystemWatcher(self)
-        self.config_watcher.fileChanged.connect(
-            self._on_config_watch_event
-        )
-        self.config_watcher.directoryChanged.connect(
-            self._on_config_watch_event
-        )
-
-        # Event-driven debounce only: QFileSystemWatcher supplies the events.
-        # This timer does not poll the filesystem.
-        self.config_watch_timer = QTimer(self)
-        self.config_watch_timer.setSingleShot(True)
-        self.config_watch_timer.setInterval(200)
-        self.config_watch_timer.timeout.connect(
-            self._check_config_change
-        )
+        self.mica_enabled = bool(config["Mica"] and supports_mica())
+        self.api = YamahaApi(config["Host"], config)
+        self.pool = QThreadPool(self)
+        # Keep receiver requests serialized; Sony retains its default pool size.
+        self.pool.setMaxThreadCount(1)
+        self._workers = set()
+        self.poll_running = False
+        self.initialized = False
+        self.tray = None
+        self._really_close = False
+        self._shutting_down = False
+        self._worker_generation = 0
+        self._restart_failed = False
+        self._config_digest = self._get_config_digest()
+        self._config_restart_pending = False
 
         self.connected = False
-        self.refresh_running = False
         self.action_running = False
-        self.initialized_inputs = False
-        self.closing = False
-
-        # Keep receiver communication serialized. Embedded receiver APIs often
-        # expect one request stream at a time, and retaining the workers also
-        # avoids PySide lifetime races.
-        self.thread_pool = QThreadPool(self)
-        self.thread_pool.setMaxThreadCount(1)
-        self.active_workers = set()
-
+        self.last_status = None
+        self.inputs = []
+        self.input_settings = config["Inputs"]
+        self.favorite_buttons = {}
         self.control_widgets = []
+        self._polling_initialized = False
 
-        self.setWindowTitle("Yamaha Remote")
-        self.setWindowIcon(QApplication.windowIcon())
-        self.setFixedWidth(330)
+        self._build_ui()
+        self._apply_style()
+        self._setup_timers()
+        self._setup_config_watcher()
+        self._setup_tray()
+        self.set_controls_enabled(False)
+        QTimer.singleShot(0, self.initialize)
 
-        if self.mica_enabled:
-            self.setAttribute(Qt.WA_TranslucentBackground)
-
-        self.layout = QGridLayout(self)
-        self.layout.setHorizontalSpacing(8)
-        self.layout.setVerticalSpacing(8)
-        self.layout.setContentsMargins(10, 10, 10, 10)
-
-
-        self.volume_status = self._new_status_label("")
-
-        self.mute_button = self._new_button("Mute")
-        self.power_button = self._new_button("Standby")
-        self.volume_down_button = self._new_button("Volume -")
-        self.volume_up_button = self._new_button("Volume +")
-
-        self.mute_button.clicked.connect(self.toggle_mute)
-        self.power_button.clicked.connect(self.toggle_power)
-        self.volume_down_button.clicked.connect(
-            lambda: self.change_volume(-1)
-        )
-        self.volume_up_button.clicked.connect(
-            lambda: self.change_volume(1)
-        )
-
-        row = 0
-
-        self.layout.addWidget(self.mute_button, row, 0)
-        self.layout.addWidget(self.power_button, row, 1)
-        row += 1
-
-        volume_row = QHBoxLayout()
-        volume_row.setSpacing(8)
-        volume_row.setContentsMargins(0, 0, 0, 0)
-        volume_row.addWidget(self.volume_down_button, 1)
-        volume_row.addWidget(self.volume_status, 0)
-        volume_row.addWidget(self.volume_up_button, 1)
-
-        self.layout.addLayout(
-            volume_row,
-            row,
-            0,
-            1,
-            2,
-        )
-        row += 1
-
-        favorite_inputs = [
-            (input_id, settings)
-            for input_id, settings in self.input_settings.items()
-            if settings["Favorite"]
-        ]
-
-        for i in range(0, len(favorite_inputs), 2):
-            for column in range(2):
-                index = i + column
-
-                if index < len(favorite_inputs):
-                    input_id, settings = favorite_inputs[index]
-                    button = self._new_button(
-                        _input_display_name(settings)
-                    )
-
-                    button.clicked.connect(
-                        lambda checked=False, input_id=input_id:
-                            self.change_input(input_id)
-                    )
-
-                    self.favorite_buttons[input_id] = button
-                    self.control_widgets.append(button)
-                    self.layout.addWidget(
-                        button,
-                        row,
-                        column,
-                    )
-
-            row += 1
-
-        self.input_combo = QComboBox()
-        self.input_combo.setMinimumHeight(30)
-        self.input_combo.activated.connect(
-            self.input_selected
-        )
-
-        self.layout.addWidget(
-            self.input_combo,
-            row,
-            0,
-            1,
-            2,
-        )
-
-        self.control_widgets.extend(
-            [
-                self.mute_button,
-                self.power_button,
-                self.volume_down_button,
-                self.volume_up_button,
-                self.input_combo,
-            ]
-        )
-
-        # Size the window for the configured number of favorite rows,
-        # then prevent manual resizing while the app is running.
-        self.setFixedHeight(self.sizeHint().height())
-
-        self.refresh_timer = QTimer(self)
-        self.refresh_timer.setInterval(2000)
-        self.refresh_timer.timeout.connect(
-            self.refresh_status
+    def _setup_timers(self):
+        self.poll_timer = QTimer(self)
+        self.poll_timer.setInterval(POLL_INTERVAL_MS)
+        self.poll_timer.timeout.connect(
+            self.poll_status
         )
 
         self.startup_status_timer = QTimer(self)
@@ -923,222 +1118,122 @@ class YamahaRemote(QWidget):
             self.show_connecting_status
         )
 
-        if self.dark_mode:
-            self.apply_dark_theme()
+    # ----------------------------
+    # UI construction and styling
+    # ----------------------------
 
-        self.set_controls_enabled(False)
-
-        if self.system_tray_enabled:
-            self.setup_system_tray()
-
-        self._start_config_watcher()
-        QTimer.singleShot(0, self.initialize)
-
-    def setup_system_tray(self):
-        if not QSystemTrayIcon.isSystemTrayAvailable():
-            raise ConfigError(
-                "System tray support was enabled, but no "
-                "system tray is available on this desktop."
-            )
-
-        self.tray_icon = QSystemTrayIcon(
-            QApplication.windowIcon(),
-            self,
-        )
-        self.tray_icon.setToolTip("Yamaha Remote")
-
-        menu = QMenu(self)
-
-        show_action = QAction("Show", self)
-        show_action.triggered.connect(
-            self.show_from_tray
-        )
-        menu.addAction(show_action)
-
-        menu.addSeparator()
-
-        exit_action = QAction("Exit", self)
-        exit_action.triggered.connect(
-            self.exit_from_tray
-        )
-        menu.addAction(exit_action)
-
-        self.tray_icon.setContextMenu(menu)
-        self.tray_icon.activated.connect(
-            self.tray_activated
-        )
-        self.tray_icon.show()
-
-    def tray_activated(self, reason):
-        if reason == QSystemTrayIcon.DoubleClick:
-            self.show_from_tray()
-
-    def show_from_tray(self):
-        self.show()
-        self.raise_()
-        self.activateWindow()
-
-    def exit_from_tray(self):
-        self.force_exit = True
-        self.close()
-
-    def _start_config_watcher(self):
-        paths = {
-            str(self.config_path),
-            str(self.config_path.parent),
-        }
-
-        watched = set(self.config_watcher.files())
-        watched.update(self.config_watcher.directories())
-
-        missing = [
-            path
-            for path in paths
-            if path not in watched
-        ]
-
-        if missing:
-            self.config_watcher.addPaths(missing)
-
-    def _on_config_watch_event(self, _path):
-        # Many editors save by replacing the file. Watching both the file and
-        # its directory lets us re-add a replaced file without polling.
-        self.config_watch_timer.start()
-
-    def _check_config_change(self):
-        self._start_config_watcher()
-
-        new_hash = _file_sha256(self.config_path)
-
-        if new_hash is None or new_hash == self.config_hash:
-            return
-
-        try:
-            raw_config = json.loads(
-                self.config_path.read_text(encoding="utf-8")
-            )
-            validate_config(raw_config)
-        except (OSError, json.JSONDecodeError, ConfigError):
-            # Ignore partial or invalid saves. A later filesystem event will
-            # trigger another check when the editor writes valid JSON.
-            return
-
-        self.config_hash = new_hash
-        self._restart_for_config_change()
-
-    def _restart_for_config_change(self):
-        if self.config_restart_pending:
-            return
-
-        self.config_restart_pending = True
-        self.closing = True
-
-        self.refresh_timer.stop()
-        self.startup_status_timer.stop()
-        self.config_watch_timer.stop()
-
-        self.thread_pool.clear()
-        self.thread_pool.waitForDone(-1)
-        self.active_workers.clear()
-
-        app = QApplication.instance()
-        instance_lock = app.property("yamaha_instance_lock")
-
-        # Release the single-instance guard before starting the replacement.
-        if isinstance(
-            instance_lock,
-            _WindowsSingleInstanceMutex,
-        ):
-            instance_lock.close()
-        elif isinstance(instance_lock, QLockFile):
-            instance_lock.unlock()
-
-        result = QProcess.startDetached(
-            sys.executable,
-            [str(Path(__file__).resolve())],
-        )
-
-        started = (
-            result[0]
-            if isinstance(result, tuple)
-            else bool(result)
-        )
-
-        if not started:
-            # Keep this instance usable if spawning the replacement fails.
-            replacement_lock = acquire_single_instance_lock()
-            app.setProperty(
-                "yamaha_instance_lock",
-                replacement_lock,
-            )
-            self.closing = False
-            self.config_restart_pending = False
-            self.refresh_timer.start()
-            self._start_config_watcher()
-            return
-
-        if self.tray_icon is not None:
-            self.tray_icon.hide()
-
-        app.quit()
-
-    def closeEvent(self, event):
-        if (
-            self.close_to_tray
-            and not self.force_exit
-            and self.tray_icon is not None
-        ):
-            event.ignore()
-            self.hide()
-            return
-
-        self.closing = True
-        self.refresh_timer.stop()
-        self.startup_status_timer.stop()
-        self.config_watch_timer.stop()
-
-        # Drop work that has not started, then wait for the single running
-        # receiver request to finish. Receiver operations have their own
-        # bounded network/action timeouts, so leaving a QThreadPool worker
-        # behind is both unnecessary and unsafe during interpreter shutdown.
-        self.thread_pool.clear()
-        self.thread_pool.waitForDone(-1)
-        self.active_workers.clear()
-
-        if self.tray_icon is not None:
-            self.tray_icon.hide()
-
-        event.accept()
-
-        # Be explicit about terminating the application. This is especially
-        # important for tray exits, where Qt objects can otherwise outlive the
-        # main window even though it has disappeared.
-        app = QApplication.instance()
-        if app is not None:
-            app.quit()
-
-    def mousePressEvent(self, event):
-        if (
-            event.button() == Qt.LeftButton
-            and self.childAt(event.position().toPoint()) is None
-        ):
-            handle = self.windowHandle()
-
-            if handle is not None:
-                handle.startSystemMove()
-                event.accept()
-                return
-
-        super().mousePressEvent(event)
-
-    def showEvent(self, event):
-        super().showEvent(event)
+    def _build_ui(self):
+        self.setWindowTitle(APP_NAME)
+        self.setWindowIcon(QApplication.windowIcon())
+        self.setFixedWidth(330)
 
         if self.mica_enabled:
-            apply_mica(int(self.winId()))
+            self.setAttribute(Qt.WA_TranslucentBackground)
 
-        if self.dark_mode and sys.platform == "win32":
-            set_dark_titlebar(int(self.winId()))
+        self.main_layout = QGridLayout(self)
+        self.main_layout.setHorizontalSpacing(8)
+        self.main_layout.setVerticalSpacing(8)
+        self.main_layout.setContentsMargins(10, 10, 10, 10)
+
+        self._favorite_start_row = 2
+        self._build_volume_controls()
+        self._build_favorites_from_config()
+        self._build_input_controls()
+        self._fit_and_lock_window()
+
+    def _build_volume_controls(self):
+        self.volume_value = self._new_status_label("")
+
+        self.mute_button = self._new_button("Mute")
+        self.power_button = self._new_button("Standby")
+        self.volume_down = self._new_button("Volume -")
+        self.volume_up = self._new_button("Volume +")
+
+        self.mute_button.clicked.connect(self.toggle_mute)
+        self.power_button.clicked.connect(self.toggle_power)
+        self.volume_down.clicked.connect(
+            lambda: self.adjust_volume(-1)
+        )
+        self.volume_up.clicked.connect(
+            lambda: self.adjust_volume(1)
+        )
+
+        self.main_layout.addWidget(self.mute_button, 0, 0)
+        self.main_layout.addWidget(self.power_button, 0, 1)
+
+        volume_row = QHBoxLayout()
+        volume_row.setSpacing(8)
+        volume_row.setContentsMargins(0, 0, 0, 0)
+        volume_row.addWidget(self.volume_down, 1)
+        volume_row.addWidget(self.volume_value, 0)
+        volume_row.addWidget(self.volume_up, 1)
+
+        self.main_layout.addLayout(
+            volume_row,
+            1,
+            0,
+            1,
+            2,
+        )
+
+    def _build_favorites_from_config(self):
+        buttons = dict(self.favorite_buttons)
+        for button in buttons.values():
+            self.main_layout.removeWidget(button)
+        self.favorite_buttons.clear()
+        favorites = [
+            (input_id, settings)
+            for input_id, settings in _ordered_entries(
+                self.input_settings, self.config["SortByName"]
+            )
+            if settings["Favorite"]
+        ]
+        for index, (input_id, settings) in enumerate(favorites):
+            button = buttons.pop(input_id, None)
+            if button is None:
+                button = self._new_button("")
+                button.clicked.connect(
+                    lambda checked=False, input_id=input_id: self.set_input(input_id)
+                )
+                self.control_widgets.append(button)
+            button.setText(_entry_display_name(settings))
+            self.favorite_buttons[input_id] = button
+            row, column = divmod(index, 2)
+            self.main_layout.addWidget(button, self._favorite_start_row + row, column)
+        for button in buttons.values():
+            self.control_widgets.remove(button)
+            button.hide()
+            button.deleteLater()
+
+    def _build_input_controls(self):
+        self.input_combo = QComboBox()
+        self.input_combo.setMinimumHeight(30)
+        self.input_combo.activated.connect(
+            self.select_input
+        )
+
+        self.main_layout.addWidget(
+            self.input_combo,
+            self._favorite_start_row + (len(self.favorite_buttons) + 1) // 2,
+            0,
+            1,
+            2,
+        )
+
+        self.control_widgets.extend(
+            [
+                self.mute_button,
+                self.power_button,
+                self.volume_down,
+                self.volume_up,
+                self.input_combo,
+            ]
+        )
+
+    def _fit_and_lock_window(self):
+        # Size the window for the configured number of favorite rows,
+        # then prevent manual resizing while the app is running.
+        self.setFixedHeight(self.sizeHint().height())
 
     def _new_status_label(self, text):
         label = DraggableLabel(text, self)
@@ -1152,7 +1247,9 @@ class YamahaRemote(QWidget):
         button.setMinimumHeight(34)
         return button
 
-    def apply_dark_theme(self):
+    def _apply_style(self):
+        if not self.config["DarkMode"]:
+            return
         palette = self.palette()
 
         if self.mica_enabled:
@@ -1262,51 +1359,80 @@ class YamahaRemote(QWidget):
                 }
             """)
 
-    def start_worker(self, function, callback):
-        if self.closing:
+    # ----------------------------
+    # Background work
+    # ----------------------------
+
+    def run_worker(self, function, on_result=None, on_error=None, on_finished=None):
+        if self._shutting_down or missing_config_settings(self.config):
             return
-
         worker = Worker(function)
-        self.active_workers.add(worker)
+        self._workers.add(worker)
+        generation = self._worker_generation
 
-        def completed(result, error, worker=worker):
-            self.active_workers.discard(worker)
+        def deliver_result(result):
+            if not self._shutting_down and generation == self._worker_generation and on_result:
+                on_result(result)
 
-            if not self.closing:
-                callback(result, error)
+        def deliver_error(error):
+            if not self._shutting_down and generation == self._worker_generation:
+                (on_error or self.handle_request_error)(error)
 
-        worker.signals.completed.connect(completed)
-        self.thread_pool.start(worker)
+        def finished():
+            self._workers.discard(worker)
+            if not self._shutting_down and generation == self._worker_generation and on_finished:
+                on_finished()
+
+        worker.signals.result.connect(deliver_result)
+        worker.signals.error.connect(deliver_error)
+        worker.signals.finished.connect(finished)
+        self.pool.start(worker)
+
+    def run_action(self, action):
+        if self._shutting_down:
+            return False
+
+        if self.action_running or not self.connected:
+            return False
+
+        self.action_running = True
+
+        def done(result):
+            self.action_running = False
+            self.poll_status()
+
+        def failed(error):
+            self.action_running = False
+            self.handle_request_error(error)
+            self.poll_status()
+
+        self.run_worker(action, on_result=done, on_error=failed)
+        return True
+
+    # ----------------------------
+    # Discovery and polling
+    # ----------------------------
 
     def initialize(self):
-        self.refresh_timer.start()
+        if self._shutting_down:
+            return
+        self._polling_initialized = True
+        if missing_config_settings(self.config):
+            self.power_button.setText("Configure device")
+            return
+        self._update_polling_state()
         self.startup_status_timer.start()
         self.load_inputs()
 
-    def show_connecting_status(self):
-        if (
-            not self.connected
-            and not self.closing
-        ):
-            self.power_button.setText("Connecting...")
-
-    def clear_startup_status(self):
-        if self.startup_status_timer.isActive():
-            self.startup_status_timer.stop()
-
     def load_inputs(self):
-        if self.closing:
+        if self._shutting_down:
             return
 
-        if self.initialized_inputs:
-            self.refresh_status()
+        if self.initialized:
+            self.poll_status()
             return
 
-        def completed(inputs, error):
-            if error is not None:
-                self.set_offline()
-                return
-
+        def done(inputs):
             config_changed = False
 
             for item in inputs:
@@ -1327,45 +1453,32 @@ class YamahaRemote(QWidget):
                     settings["Name"] = yamaha_name
                     config_changed = True
 
-            if config_changed:
+            # After a failed restart the file contains unapplied user edits.
+            # Discovery may update memory, but must not overwrite that file.
+            if config_changed and not self._restart_failed:
                 try:
-                    save_config(self.config)
-                    self.config_hash = _file_sha256(
-                        self.config_path
-                    )
+                    self._save_config_without_restart()
                 except ConfigError as ex:
+                    record_exception(ex, "Configuration save")
                     QMessageBox.warning(
                         self,
                         "Yamaha Remote - Configuration Warning",
                         str(ex),
                     )
 
-            visible_inputs = []
-
-            for item in inputs:
-                settings = self.input_settings[item["Id"]]
-
-                if settings["Hidden"]:
-                    continue
-
-                visible_inputs.append(
-                    {
-                        "Id": item["Id"],
-                        "Label": _input_display_name(settings),
-                    }
+            available_ids = {item["Id"] for item in inputs}
+            visible_inputs = [
+                {"Id": input_id, "Label": _entry_display_name(settings)}
+                for input_id, settings in _ordered_entries(
+                    self.input_settings, self.config["SortByName"]
                 )
+                if input_id in available_ids and not settings["Hidden"]
+            ]
 
-            visible_inputs.sort(
-                key=lambda item: item["Label"].lower()
-            )
-
-            for input_id, button in self.favorite_buttons.items():
-                settings = self.input_settings.get(input_id)
-                if settings is not None:
-                    button.setText(_input_display_name(settings))
+            self._build_favorites_from_config()
 
             self.inputs = visible_inputs
-            self.initialized_inputs = True
+            self.initialized = True
             self.input_combo.clear()
 
             for item in self.inputs:
@@ -1381,12 +1494,71 @@ class YamahaRemote(QWidget):
                     Qt.TextAlignmentRole,
                 )
 
-            self.refresh_status()
+            self.poll_status()
 
-        self.start_worker(
-            self.backend.get_inputs,
-            completed,
+        self.run_worker(
+            self.api.get_inputs,
+            on_result=done,
+            on_error=lambda error: self.handle_request_error(error, background=True),
         )
+
+    def show_connecting_status(self):
+        if (
+            not self.connected
+            and not self._shutting_down
+        ):
+            self.power_button.setText("Connecting...")
+
+    def clear_startup_status(self):
+        if self.startup_status_timer.isActive():
+            self.startup_status_timer.stop()
+
+    def poll_status(self):
+        if (self._shutting_down or missing_config_settings(self.config)
+                or not self.isVisible() or self.isMinimized()):
+            return
+
+        if self.poll_running or self.action_running:
+            return
+
+        self.poll_running = True
+
+        def done(status):
+            self.poll_running = False
+            self.clear_startup_status()
+            self.connected = True
+            self.power_button.setToolTip("")
+            self.last_status = status
+            self.show_cached_status()
+            self.update_control_states()
+
+            if not self.initialized:
+                self.load_inputs()
+
+        def failed(error):
+            self.poll_running = False
+            self.handle_request_error(error, background=True)
+
+        self.run_worker(self.api.get_status, on_result=done, on_error=failed)
+
+    def _update_polling_state(self, refresh=False):
+        if self._shutting_down or not hasattr(self, "poll_timer"):
+            return
+        should_poll = (
+            self._polling_initialized and self.isVisible() and not self.isMinimized()
+            and not missing_config_settings(self.config)
+        )
+        if should_poll:
+            if refresh:
+                self.poll_status()
+            if not self.poll_timer.isActive():
+                self.poll_timer.start()
+        else:
+            self.poll_timer.stop()
+
+    # ----------------------------
+    # State and request errors
+    # ----------------------------
 
     def set_controls_enabled(self, enabled):
         enabled = bool(enabled)
@@ -1407,140 +1579,47 @@ class YamahaRemote(QWidget):
         power_on = self.last_status.get("power") == "on"
 
         self.mute_button.setEnabled(power_on)
-        self.volume_down_button.setEnabled(power_on)
-        self.volume_up_button.setEnabled(power_on)
+        self.volume_down.setEnabled(power_on)
+        self.volume_up.setEnabled(power_on)
+
+    def handle_request_error(self, error, *, background=False, hint=None):
+        record_unexpected_exception(
+            error, "Background request" if background else "Command", background=background
+        )
+        if isinstance(error, DeviceConnectionError):
+            self.set_offline()
+        elif background:
+            self.set_error_status()
+        if isinstance(error, (DeviceConnectionError, DeviceResponseError)):
+            message = str(error)
+        else:
+            message = f"Unexpected request error ({type(error).__name__})."
+        self.power_button.setToolTip(message)
+        if not background:
+            if hint:
+                message += "\n\n" + hint
+            self.show_error(message)
+
+    def show_error(self, message):
+        QMessageBox.warning(self, "Yamaha Remote", message)
 
     def set_offline(self):
         self.clear_startup_status()
         self.connected = False
         self.last_status = None
 
-        self.volume_status.setText("-")
+        self.volume_value.setText("-")
         self.power_button.setText("Offline")
 
         self.set_controls_enabled(False)
 
     def set_error_status(self):
+        self.clear_startup_status()
+        self.connected = False
+        self.last_status = None
+        self.volume_value.setText("-")
         self.power_button.setText("Error")
-        self.update_control_states()
-
-    def refresh_status(self):
-        if self.closing:
-            return
-
-        if self.refresh_running or self.action_running:
-            return
-
-        self.refresh_running = True
-
-        def completed(status, error):
-            self.refresh_running = False
-
-            if error is not None:
-                if isinstance(error, YamahaConnectionError):
-                    self.set_offline()
-                else:
-                    self.set_error_status()
-                return
-
-            self.clear_startup_status()
-            self.connected = True
-            self.last_status = status
-            self.show_cached_status()
-            self.update_control_states()
-
-            if not self.initialized_inputs:
-                self.load_inputs()
-
-        self.start_worker(
-            self.backend.get_status,
-            completed,
-        )
-
-    def run_action(self, action):
-        if self.closing:
-            return False
-
-        if self.action_running or not self.connected:
-            return False
-
-        self.action_running = True
-
-        def completed(result, error):
-            self.action_running = False
-
-            if error is not None:
-                if isinstance(error, YamahaConnectionError):
-                    self.set_offline()
-                else:
-                    self.set_error_status()
-                return
-
-            self.refresh_status()
-
-        self.start_worker(
-            action,
-            completed,
-        )
-        return True
-
-    def toggle_mute(self):
-        if not self.last_status:
-            return
-
-        enabled = not bool(self.last_status.get("mute"))
-
-        if self.run_action(
-            lambda: self.backend.set_mute(enabled)
-        ):
-            self.last_status["mute"] = enabled
-            self.show_cached_status()
-
-    def toggle_power(self):
-        if not self.last_status:
-            return
-
-        power_on = self.last_status.get("power") != "on"
-
-        def action():
-            self.backend.set_power(power_on)
-
-            if power_on:
-                self.backend.wait_until_powered_on()
-
-        self.run_action(action)
-
-    def change_volume(self, direction):
-        if not self.last_status:
-            return
-
-        action = (
-            self.backend.volume_down
-            if direction < 0
-            else self.backend.volume_up
-        )
-
-        if self.run_action(action) and self.last_status.get("power") == "on":
-            self.last_status["volume"] = (
-                self.backend.preview_volume(
-                    self.last_status.get("volume"),
-                    direction,
-                )
-            )
-            self.show_cached_status()
-
-    def change_input(self, input_id):
-        self.run_action(
-            lambda: self.backend.set_input(input_id)
-        )
-
-    def input_selected(self, index):
-        if index < 0:
-            return
-
-        input_id = self.input_combo.itemData(index)
-        if input_id:
-            self.change_input(str(input_id))
+        self.set_controls_enabled(False)
 
     def show_cached_status(self):
         if not self.last_status:
@@ -1551,7 +1630,7 @@ class YamahaRemote(QWidget):
         power = status.get("power", "")
 
         volume_text = (
-            self.backend.format_volume(
+            self.api.format_volume(
                 status.get("volume")
             )
             if power == "on"
@@ -1560,7 +1639,7 @@ class YamahaRemote(QWidget):
 
         muted = bool(status.get("mute"))
 
-        self.volume_status.setText(
+        self.volume_value.setText(
             volume_text
         )
 
@@ -1590,112 +1669,362 @@ class YamahaRemote(QWidget):
 
             self.input_combo.setCurrentIndex(matching_index)
 
+    # ----------------------------
+    # Device actions and shortcuts
+    # ----------------------------
 
-
-class _WindowsSingleInstanceMutex:
-    ERROR_ALREADY_EXISTS = 183
-
-    def __init__(self, name):
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=False)
-
-        kernel32.CreateMutexW.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_bool,
-            ctypes.c_wchar_p,
-        ]
-        kernel32.CreateMutexW.restype = ctypes.c_void_p
-
-        kernel32.GetLastError.argtypes = []
-        kernel32.GetLastError.restype = ctypes.c_ulong
-
-        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
-        kernel32.CloseHandle.restype = ctypes.c_bool
-
-        handle = kernel32.CreateMutexW(
-            None,
-            False,
-            name,
-        )
-
-        # GetLastError must be read immediately after CreateMutexW.
-        error = kernel32.GetLastError()
-
-        if not handle:
-            raise OSError(
-                error,
-                "CreateMutexW failed.",
-            )
-
-        if error == self.ERROR_ALREADY_EXISTS:
-            kernel32.CloseHandle(handle)
-            self.handle = None
-            self.kernel32 = None
+    def toggle_power(self):
+        if not self.last_status:
             return
 
-        self.handle = handle
-        self.kernel32 = kernel32
+        power_on = self.last_status.get("power") != "on"
 
-    @property
-    def acquired(self):
-        return self.handle is not None
+        def action():
+            self.api.set_power(power_on)
 
-    def close(self):
-        if self.handle is not None:
-            self.kernel32.CloseHandle(self.handle)
-            self.handle = None
+            if power_on:
+                self.api.wait_until_powered_on()
 
-    def __del__(self):
-        self.close()
+        self.run_action(action)
 
+    def toggle_mute(self):
+        if not self.last_status:
+            return
 
-def acquire_single_instance_lock():
-    if sys.platform == "win32":
-        mutex = _WindowsSingleInstanceMutex(
-            "YamahaRemote.SingleInstance"
+        enabled = not bool(self.last_status.get("mute"))
+
+        if self.run_action(
+            lambda: self.api.set_mute(enabled)
+        ):
+            self.last_status["mute"] = enabled
+            self.show_cached_status()
+
+    def adjust_volume(self, direction):
+        if not self.last_status:
+            return
+
+        action = (
+            self.api.volume_down
+            if direction < 0
+            else self.api.volume_up
         )
 
-        if not mutex.acquired:
-            return None
+        if self.run_action(action) and self.last_status.get("power") == "on":
+            self.last_status["volume"] = (
+                self.api.preview_volume(
+                    self.last_status.get("volume"),
+                    direction,
+                )
+            )
+            self.show_cached_status()
 
-        return mutex
+    def select_input(self, index):
+        if index < 0:
+            return
 
-    temp_dir = QStandardPaths.writableLocation(
-        QStandardPaths.TempLocation
-    )
+        input_id = self.input_combo.itemData(index)
+        if input_id:
+            self.set_input(str(input_id))
 
-    lock_path = str(
-        Path(temp_dir) / "YamahaRemote.lock"
-    )
+    def set_input(self, input_id):
+        self.run_action(
+            lambda: self.api.set_input(input_id)
+        )
 
-    lock = QLockFile(lock_path)
+    # ----------------------------
+    # Configuration watching and restart
+    # ----------------------------
 
-    # Disable age-based stale detection for this long-lived lock. QLockFile
-    # can still recover a lock whose owning process no longer exists.
-    lock.setStaleLockTime(0)
+    def _get_config_digest(self):
+        return _file_sha256(CONFIG_PATH)
 
-    if not lock.tryLock(0):
-        return None
+    def _setup_config_watcher(self):
+        self.config_watcher = QFileSystemWatcher(self)
+        self.config_watcher.fileChanged.connect(
+            self._config_path_changed
+        )
+        self.config_watcher.directoryChanged.connect(
+            self._config_path_changed
+        )
 
-    return lock
+        # Event-driven debounce only: QFileSystemWatcher supplies the events.
+        # This timer does not poll the filesystem.
+        self.config_restart_timer = QTimer(self)
+        self.config_restart_timer.setSingleShot(True)
+        self.config_restart_timer.setInterval(CONFIG_RESTART_DEBOUNCE_MS)
+        self.config_restart_timer.timeout.connect(
+            self._check_external_config_change
+        )
+
+        self._watch_config_paths()
+
+    def _watch_config_paths(self):
+        paths = {
+            str(CONFIG_PATH),
+            str(CONFIG_PATH.parent),
+        }
+
+        watched = set(self.config_watcher.files())
+        watched.update(self.config_watcher.directories())
+
+        missing = [
+            path
+            for path in paths
+            if path not in watched
+        ]
+
+        if missing:
+            self.config_watcher.addPaths(missing)
+
+    def _config_path_changed(self, _path):
+        if self._shutting_down or self._config_restart_pending:
+            return
+        # Many editors save by replacing the file. Watching both the file and
+        # its directory lets us re-add a replaced file without polling.
+        self.config_restart_timer.start()
+
+    def _check_external_config_change(self):
+        if self._shutting_down or self._config_restart_pending:
+            return
+        self._watch_config_paths()
+
+        new_hash = _file_sha256(CONFIG_PATH)
+
+        if new_hash is None or new_hash == self._config_digest:
+            return
+
+        try:
+            raw_config = json.loads(
+                CONFIG_PATH.read_text(encoding="utf-8")
+            )
+            validate_config(raw_config)
+        except (OSError, ValueError) as ex:
+            if new_hash != getattr(self, "_invalid_config_digest", None):
+                self._invalid_config_digest = new_hash
+                QMessageBox.warning(
+                    self, "Yamaha Remote - Configuration Error",
+                    f"The configuration change was not applied:\n{ex}\n\n"
+                    "Correct the JSON settings and save again. The current instance remains running.",
+                )
+            return
+
+        self._invalid_config_digest = None
+        self._restart_for_config_change()
+
+    def _save_config_without_restart(self):
+        if self._restart_failed:
+            return
+        save_config(self.config)
+        self._config_digest = self._get_config_digest()
+        self._watch_config_paths()
+
+    def _restart_for_config_change(self):
+        if self._shutting_down or self._config_restart_pending:
+            return
+        self._config_restart_pending = True
+        active_timers = self._pause_background_work()
+        release_single_instance()
+        try:
+            launch_replacement()
+        except Exception as exc:
+            try:
+                if not acquire_single_instance():
+                    raise RuntimeError("Another instance may already be running.")
+            except Exception as lock_error:
+                QMessageBox.critical(
+                    self, "Yamaha Remote - Restart Error",
+                    f"Could not restart: {exc}\nCould not restore the instance lock: "
+                    f"{lock_error}\nThis instance will close.",
+                )
+                self._shutdown()
+                QApplication.quit()
+                return
+            # Retain the original in-memory settings, but consume this file
+            # revision so an unrelated directory event cannot retry forever.
+            self._config_digest = _file_sha256(CONFIG_PATH)
+            self._restart_failed = True
+            self._resume_background_work(active_timers)
+            QMessageBox.warning(
+                self, "Yamaha Remote - Restart Error",
+                f"Could not restart: {exc}\n\nThe current instance is still running "
+                "with its previous settings. Edit and save the JSON again to retry.",
+            )
+            return
+        self._shutdown()
+        QApplication.quit()
+
+    # ----------------------------
+    # Tray and shutdown lifecycle
+    # ----------------------------
+
+    def _setup_tray(self):
+        if not self.config["SystemTray"] or not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+
+        self.tray = QSystemTrayIcon(
+            QApplication.windowIcon(),
+            self,
+        )
+        self.tray.setToolTip("Yamaha Remote")
+
+        menu = QMenu(self)
+
+        show_action = QAction("Show", self)
+        show_action.triggered.connect(
+            self.show_from_tray
+        )
+        menu.addAction(show_action)
+
+        menu.addSeparator()
+
+        exit_action = QAction("Exit", self)
+        exit_action.triggered.connect(
+            self.quit_from_tray
+        )
+        menu.addAction(exit_action)
+
+        self.tray.setContextMenu(menu)
+        self.tray.activated.connect(
+            self.tray_activated
+        )
+        self.tray.show()
+
+    def tray_activated(self, reason):
+        if reason == QSystemTrayIcon.DoubleClick:
+            self.show_from_tray()
+
+    def show_from_tray(self):
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+        self._update_polling_state(refresh=True)
+
+    def quit_from_tray(self):
+        self._really_close = True
+        self.close()
+
+    def _pause_background_work(self):
+        self._shutting_down = True
+        self._worker_generation += 1
+        timers = (self.poll_timer, self.startup_status_timer, self.config_restart_timer)
+        active_timers = [timer for timer in timers if timer.isActive()]
+        for timer in timers:
+            timer.stop()
+        self.config_watcher.blockSignals(True)
+        # Drop queued jobs; active requests have their own bounded timeouts.
+        self.pool.clear()
+        self.pool.waitForDone()
+        self._workers.clear()
+        self.poll_running = False
+        self.action_running = False
+        return active_timers
+
+    def _resume_background_work(self, active_timers):
+        self._shutting_down = False
+        self._config_restart_pending = False
+        self.config_watcher.blockSignals(False)
+        self._watch_config_paths()
+        for timer in active_timers:
+            timer.start()
+        if not missing_config_settings(self.config):
+            self.update_control_states()
+            self.load_inputs()
+        self._update_polling_state(refresh=True)
+
+    def _shutdown(self):
+        if getattr(self, "_shutdown_complete", False):
+            return
+        self._pause_background_work()
+        self._shutdown_complete = True
+        self._really_close = True
+        if self.tray is not None:
+            self.tray.hide()
+        release_single_instance()
+
+    # ----------------------------
+    # Qt events
+    # ----------------------------
+
+    def showEvent(self, event):
+        super().showEvent(event)
+
+        if self.mica_enabled:
+            apply_mica(int(self.winId()))
+
+        if self.config["DarkMode"] and sys.platform == "win32":
+            set_dark_titlebar(int(self.winId()))
+        self._update_polling_state(refresh=True)
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self._update_polling_state()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.WindowStateChange:
+            QTimer.singleShot(
+                0,
+                lambda: self._update_polling_state(
+                    refresh=self.isVisible() and not self.isMinimized()
+                ),
+            )
+
+    def closeEvent(self, event):
+        if (self.config["CloseToTray"] and not self._really_close and self.tray is not None
+                and QSystemTrayIcon.isSystemTrayAvailable()):
+            event.ignore()
+            self.hide()
+            return
+        self._shutdown()
+        event.accept()
+        QApplication.quit()
+
+    def mousePressEvent(self, event):
+        if (
+            event.button() == Qt.LeftButton
+            and self.childAt(event.position().toPoint()) is None
+        ):
+            handle = self.windowHandle()
+
+            if handle is not None:
+                handle.startSystemMove()
+                event.accept()
+                return
+
+        super().mousePressEvent(event)
 
 
-def main():
+# ----------------------------
+# Application entry points
+# ----------------------------
+
+
+def launch_replacement():
+    script_path = Path(__file__).resolve()
+    arguments = list(sys.argv[1:])
+    if not getattr(sys, "frozen", False):
+        arguments.insert(0, str(script_path))
+    result = QProcess.startDetached(sys.executable, arguments, str(script_path.parent))
+    started = result[0] if isinstance(result, tuple) else bool(result)
+    if not started:
+        raise OSError("The replacement process could not be started.")
+
+
+def _run_application():
     app = QApplication(sys.argv)
 
-    instance_lock = acquire_single_instance_lock()
-
-    if instance_lock is None:
+    try:
+        acquired = acquire_single_instance()
+    except Exception as exc:
+        QMessageBox.critical(None, "Yamaha Remote", f"Could not acquire the instance lock:\n{exc}")
+        return 1
+    if not acquired:
         return 0
-
-    app.setProperty(
-        "yamaha_instance_lock",
-        instance_lock,
-    )
 
     if sys.platform == "win32":
         set_app_user_model_id("Yamaha.Remote")
 
-    app.setApplicationName("Yamaha Remote")
+    app.setApplicationName(APP_NAME)
     app.setWindowIcon(get_app_icon())
 
     try:
@@ -1708,26 +2037,42 @@ def main():
         )
         return 1
 
+    configure_diagnostics(config)
     try:
         window = YamahaRemote(config)
     except Exception as ex:
+        record_exception(ex, "Startup")
         QMessageBox.critical(
             None,
             "Yamaha Remote - Startup Error",
-            f"{type(ex).__name__}: {ex}",
+            f"Unexpected startup error ({type(ex).__name__}).",
         )
         return 1
 
+    app.setQuitOnLastWindowClosed(window.tray is None)
+    app.aboutToQuit.connect(window._shutdown)
+    show_missing_config_settings(config)
     window.show()
 
     try:
         return app.exec()
     finally:
-        if isinstance(
-            instance_lock,
-            _WindowsSingleInstanceMutex,
-        ):
-            instance_lock.close()
+        window._shutdown()
+
+
+def main():
+    try:
+        return _run_application()
+    except Exception as error:
+        record_exception(error, "Application")
+        if QApplication.instance() is not None:
+            QMessageBox.critical(
+                None, "Yamaha Remote", f"Unexpected application error ({type(error).__name__})."
+            )
+        return 1
+    finally:
+        release_single_instance()
+        close_diagnostics()
 
 
 if __name__ == "__main__":

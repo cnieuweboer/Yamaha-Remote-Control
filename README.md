@@ -38,6 +38,8 @@ python3 YamahaRemote.pyw
   "VolumeDb": true,
   "VolumeDbAtZero": -97.0,
   "VolumeDbStepSize": 0.5,
+  "DiagnosticsEnabled": false,
+  "SortByName": false,
   "Inputs": {},
   "SystemTray": false,
   "CloseToTray": false
@@ -50,15 +52,17 @@ python3 YamahaRemote.pyw
 - `VolumeDb` — display volume in dB instead of the API volume value.
 - `VolumeDbAtZero` — dB value corresponding to volume `0`. Required when `VolumeDb` is `true`.
 - `VolumeDbStepSize` — dB change corresponding to one volume step. Required when `VolumeDb` is `true` and must be greater than `0`.
+- `DiagnosticsEnabled` — `false` by default. Set to `true` to append unexpected errors and crash diagnostics to `YamahaRemote-crash.log` beside the script. Logs contain the app version, exception types, and stack locations; exception messages, source lines, request data, and local variable values are omitted. If the log cannot be opened or written, the app continues without logging.
+- `SortByName` — `false` (default) keeps favorites and dropdown entries in JSON insertion order; `true` sorts them alphabetically by `NameOverride`, falling back to `Name`, ignoring case.
 - `Inputs` — settings for the inputs discovered from the Yamaha device.
   - `Name` — name reported by the Yamaha device. This is updated automatically.
   - `NameOverride` — optional replacement name shown in the dropdown and on favorite buttons.
   - `Hidden` — hide the input from the dropdown menu. Hidden inputs can still be favorites.
   - `Favorite` — show a button for the input directly in the remote.
-- `SystemTray` — show a system tray icon.
-- `CloseToTray` — clicking the window close button hides the app to the tray instead of exiting.
+- `SystemTray` — show a system tray icon when the desktop supports it. If unavailable, the app runs as an ordinary window.
+- `CloseToTray` — clicking the window close button hides the app to the tray instead of exiting. If no tray is available, closing the window exits normally.
 
-YamahaRemote automatically adds newly discovered inputs to `Inputs` with default settings. Existing `NameOverride`, `Hidden`, and `Favorite` values are preserved.
+YamahaRemote automatically adds newly discovered inputs to `Inputs` with default settings. Existing `NameOverride`, `Hidden`, and `Favorite` values are preserved. Existing entries keep their JSON positions; newly discovered entries append in device discovery order. Dropdowns only include currently discovered, non-hidden entries. Favorite buttons remain independent of `Hidden`. Name sorting affects display only and does not reorder the JSON file.
 
 When `VolumeDb` is enabled, the displayed dB value is calculated using:
 
@@ -72,6 +76,8 @@ For example:
 means that a volume value of `100` is displayed as `-47.0 dB`.
 
 The app automatically restart when it detects the json file is changed.
+
+Regular status polling pauses while the window is hidden or minimized and refreshes immediately when restored. Active requests finish normally; configuration file watching remains enabled.
 
 ## Third-party code
 
