@@ -291,7 +291,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.18.19"
+__version__ = "2026.10.18.24"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -1720,6 +1720,9 @@ class YamahaRemote(QWidget):
         self.power_button = self._new_button("Standby")
         self.volume_down = self._new_button("Volume -")
         self.volume_up = self._new_button("Volume +")
+        self.mute_button.setToolTip("Shortcut: Volume Mute")
+        self.volume_down.setToolTip("Shortcut: Volume Down")
+        self.volume_up.setToolTip("Shortcut: Volume Up")
 
         self.mute_button.clicked.connect(self.toggle_mute)
         self.power_button.clicked.connect(self.toggle_power)
