@@ -63,3 +63,9 @@ IPC frame readers drain available socket data in bounded chunks, preserving inco
 Windows mutex creation uses `WinDLL(..., use_last_error=True)` and the ctypes cached last-error value immediately after `CreateMutexW`. Handle release retains pointer-sized signatures. Yamaha’s published freshness uses its existing hotkey age constant; no protocol or freshness-policy change is introduced.
 
 `tests/test_reliability.py` covers fragmented UTF-8, multi-read bursts, frame-size boundaries, invalid frames, changing/unreadable configuration files, and mocked Win32 mutex success/existing/error paths. Native Windows mutex behavior still requires Windows testing.
+
+## Command failures versus status failures
+
+`run_action` identifies its errors as command failures even for non-modal hotkey/IPC execution. A rejected command or unexpected command exception preserves the connection and cached status, then triggers the existing authoritative status refresh. Actual connection errors still mark the device offline; a failed background status read still invalidates status and disables controls. Foreground command errors keep their existing dialog feedback, while hotkey/IPC errors remain non-modal. No rejected or uncertain command is automatically retried.
+
+`tests/test_graceful_failures.py` covers rejected and unexpected command errors, genuine connection/status failures, and a simulated non-zero Yamaha API response. It does not assume a particular device's response at the volume ceiling.

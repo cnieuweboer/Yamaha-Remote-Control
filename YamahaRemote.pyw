@@ -308,7 +308,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.18.33"
+__version__ = "2026.10.18.34"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -1978,7 +1978,7 @@ class YamahaRemote(QWidget):
 
         def failed(error):
             self.action_running = False
-            self.handle_request_error(error, background=background)
+            self.handle_request_error(error, background=background, command=True)
             self.poll_status()
             self._schedule_hotkey_drain()
 
@@ -2175,13 +2175,13 @@ class YamahaRemote(QWidget):
         self.volume_down.setEnabled(power_on)
         self.volume_up.setEnabled(power_on)
 
-    def handle_request_error(self, error, *, background=False, hint=None):
+    def handle_request_error(self, error, *, background=False, hint=None, command=False):
         record_unexpected_exception(
             error, "Background request" if background else "Command", background=background
         )
         if isinstance(error, DeviceConnectionError):
             self.set_offline()
-        elif background:
+        elif background and not command:
             self.set_error_status()
         if isinstance(error, (DeviceConnectionError, DeviceResponseError)):
             message = str(error)
