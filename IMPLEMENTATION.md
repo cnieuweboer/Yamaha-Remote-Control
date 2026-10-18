@@ -45,3 +45,13 @@ Acknowledgements include a generic `reason`: empty on acceptance, `queue_full` f
 ## Device HTTP transport
 
 Device requests use a dedicated urllib opener with `ProxyHandler({})`, bypassing system and environment proxies. This keeps LAN device traffic and TV authentication headers off configured proxies without modifying urllib’s global opener. Existing request timeouts and HTTP/connection exception handling are unchanged.
+
+## Development checks
+
+Install PySide6, then run from the repository root:
+
+```sh
+python -m unittest discover -s tests -v
+```
+
+These development-only tests do not require real devices and are not imported by the applications. Each script remains independently runnable without the tests or a shared module. Endpoint naming is centralized locally in `ipc_server_name`; the user-local socket names and wire protocol are unchanged.

@@ -47,9 +47,15 @@ DEVICE_HTTP_OPENER = build_opener(ProxyHandler({}))
 # ----------------------------
 
 
-IPC_SERVER_NAME = "remote-control.amplifier.v1." + hashlib.sha256(
-    str(Path.home()).encode("utf-8")
-).hexdigest()[:16]
+IPC_USER_SUFFIX = hashlib.sha256(str(Path.home()).encode("utf-8")).hexdigest()[:16]
+
+
+def ipc_server_name(role, *, calibration=False):
+    channel = f"{role}.calibration" if calibration else role
+    return f"remote-control.{channel}.v1.{IPC_USER_SUFFIX}"
+
+
+IPC_SERVER_NAME = ipc_server_name("amplifier")
 IPC_MAX_FRAME = 4096
 
 
@@ -171,7 +177,7 @@ class CalibrationServer(QObject):
         self.token = None
         self.busy = False
         self.sockets = {}
-        self.name = IPC_SERVER_NAME.replace(".amplifier.v1.", f".{role}.calibration.v1.")
+        self.name = ipc_server_name(role, calibration=True)
         self.lock = QLockFile(str(Path(tempfile.gettempdir()) / (self.name + ".lock")))
         self.lock.setStaleLockTime(0)
         self.server = QLocalServer(self)
@@ -297,7 +303,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.18.28"
+__version__ = "2026.10.18.31"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -333,6 +339,12 @@ DEFAULT_CONFIG = {
     "SystemTray": False,
     "CloseToTray": False,
 }
+
+
+BOOLEAN_CONFIG_KEYS = (
+    "GlobalVolumeHotkeys", "DiagnosticsEnabled", "SortByName", "DarkMode", "Mica",
+    "SystemTray", "CloseToTray", "VolumeDb",
+)
 
 
 class ConfigError(ValueError):
@@ -532,40 +544,16 @@ def validate_config(raw_config, *, allow_incomplete=False):
             "The configuration root must be a JSON object."
         )
 
+    unknown = set(raw_config) - set(DEFAULT_CONFIG)
+    if unknown:
+        raise ConfigError("Unknown configuration setting(s): " + ", ".join(sorted(unknown)) + ".")
+
     config = _default_config_copy()
     config.update(raw_config)
 
-    config["GlobalVolumeHotkeys"] = _require_bool(config, "GlobalVolumeHotkeys", False)
-    config["DiagnosticsEnabled"] = _require_bool(config, "DiagnosticsEnabled", False)
-    config["SortByName"] = _require_bool(config, "SortByName", False)
-    config["Host"] = _validate_host(
-        config.get("Host")
-    )
-    config["DarkMode"] = _require_bool(
-        config,
-        "DarkMode",
-        True,
-    )
-    config["Mica"] = _require_bool(
-        config,
-        "Mica",
-        False,
-    )
-    config["SystemTray"] = _require_bool(
-        config,
-        "SystemTray",
-        False,
-    )
-    config["CloseToTray"] = _require_bool(
-        config,
-        "CloseToTray",
-        False,
-    )
-    config["VolumeDb"] = _require_bool(
-        config,
-        "VolumeDb",
-        False,
-    )
+    config["Host"] = _validate_host(config["Host"])
+    for key in BOOLEAN_CONFIG_KEYS:
+        config[key] = _require_bool(config, key, DEFAULT_CONFIG[key])
 
     if config["VolumeDb"]:
         for key in ("VolumeDbAtZero", "VolumeDbStepSize"):
@@ -608,30 +596,6 @@ def validate_config(raw_config, *, allow_incomplete=False):
         )
 
     config["Inputs"] = _validate_entries(config.get("Inputs", {}), "Inputs")
-
-    allowed_keys = {
-        "GlobalVolumeHotkeys",
-        "DiagnosticsEnabled",
-        "SortByName",
-        "Host",
-        "DarkMode",
-        "Mica",
-        "SystemTray",
-        "CloseToTray",
-        "VolumeDb",
-        "VolumeDbAtZero",
-        "VolumeDbStepSize",
-        "Inputs",
-    }
-
-    unknown = set(config) - allowed_keys
-
-    if unknown:
-        names = ", ".join(sorted(unknown))
-        raise ConfigError(
-            "Unknown configuration setting(s): "
-            f"{names}."
-        )
 
     if not allow_incomplete and missing_config_settings(config):
         raise ConfigError('"Host" must not be empty.')
@@ -1568,13 +1532,15 @@ class YamahaRemote(QWidget):
         super().__init__()
         self.config = config
         self.calibration_active = False
+        self._calibration_key_blocked = False
+        self.amplifier_server = None
         self._calibration_operation = False
         self._status_sequence = 0
         self.calibration_server = None
         self.mica_enabled = bool(config["Mica"] and supports_mica())
         self.api = YamahaApi(config["Host"], config)
         self.pool = QThreadPool(self)
-        # Keep receiver requests serialized; Sony retains its default pool size.
+        # Keep receiver requests serialized, including status refreshes.
         self.pool.setMaxThreadCount(1)
         self._workers = set()
         self.poll_running = False
@@ -1582,6 +1548,8 @@ class YamahaRemote(QWidget):
         self.tray = None
         self._really_close = False
         self._shutting_down = False
+        self._shutdown_complete = False
+        self._invalid_config_digest = None
         self._worker_generation = 0
         self._restart_failed = False
         self._config_digest = self._get_config_digest()
@@ -2158,7 +2126,7 @@ class YamahaRemote(QWidget):
             not self._shutting_down and self._polling_initialized
             and not missing_config_settings(self.config)
             and ((self.isVisible() and not self.isMinimized()) or background_control or self.calibration_active
-                 or bool(getattr(self, "amplifier_server", None) and self.amplifier_server.clients))
+                 or bool(self.amplifier_server is not None and self.amplifier_server.clients))
         )
 
 
@@ -2359,7 +2327,7 @@ class YamahaRemote(QWidget):
     # ----------------------------
 
     def _setup_ipc(self):
-        if hasattr(self, "amplifier_server"):
+        if self.amplifier_server is not None:
             self.amplifier_server.deleteLater()
         self.amplifier_server = AmplifierServer(
             self._amplifier_snapshot, self._accept_ipc_command,
@@ -2448,7 +2416,7 @@ class YamahaRemote(QWidget):
             self._hotkey_state = state
             if not state[0]:
                 self._pending_hotkeys.clear()
-        if hasattr(self, "amplifier_server"):
+        if self.amplifier_server is not None:
             self.amplifier_server.publish()
         if self.calibration_server is not None:
             self.calibration_server.publish()
@@ -2460,7 +2428,7 @@ class YamahaRemote(QWidget):
 
     def _accept_native_hotkey(self, command, foreground):
         with self._hotkey_lock:
-            if getattr(self, "_calibration_key_blocked", False):
+            if self._calibration_key_blocked:
                 return command in _VOLUME_KEYS.values()
             eligible, global_mode, window, observed_at, blocked = self._hotkey_state
             if (command not in _VOLUME_KEYS.values() or not eligible or blocked or observed_at is None
@@ -2615,7 +2583,7 @@ class YamahaRemote(QWidget):
             )
             validate_config(raw_config)
         except (OSError, ValueError) as ex:
-            if new_hash != getattr(self, "_invalid_config_digest", None):
+            if new_hash != self._invalid_config_digest:
                 self._invalid_config_digest = new_hash
                 QMessageBox.warning(
                     self, "Yamaha Remote - Configuration Error",
@@ -2760,7 +2728,7 @@ class YamahaRemote(QWidget):
         self._update_polling_state(refresh=True)
 
     def _shutdown(self):
-        if getattr(self, "_shutdown_complete", False):
+        if self._shutdown_complete:
             return
         self._pause_background_work()
         self._shutdown_complete = True

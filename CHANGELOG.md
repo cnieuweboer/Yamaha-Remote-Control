@@ -4,6 +4,8 @@ Release identifiers below come from the corresponding commits. Some releases upd
 
 ## 2026-10-18
 
+- 2026.10.18.31 — Derive configuration validation from defaults, initialize persistent state explicitly, centralize local endpoint naming, and add development-only regression tests. Scripts remain self-contained; IPC names and calibration file format are unchanged.
+
 - 2026.10.18.28 — Bypass system/environment proxies for device requests using a dedicated direct-connection opener.
 
 - 2026.10.18.27 — Reject invalid numeric IP-like hosts during configuration validation; correct the Sony sample address.
