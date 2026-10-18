@@ -433,7 +433,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.18.35"
+__version__ = "2026.10.18.36"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -448,6 +448,8 @@ POLL_INTERVAL_MS = 2000
 CONFIG_RESTART_DEBOUNCE_MS = 200
 HOTKEY_STATE_MAX_AGE_SECONDS = 6.0
 MAX_PENDING_HOTKEYS = 8
+VOLUME_BATCH_MAX_COMMANDS = 4
+VOLUME_BATCH_MAX_AGE_SECONDS = 1.0
 
 
 # ----------------------------
@@ -1576,12 +1578,6 @@ class YamahaApi:
 
         return inputs
 
-    def preview_volume(self, volume, direction):
-        try:
-            return int(volume) + direction
-        except (TypeError, ValueError):
-            return volume
-
     def wait_until_powered_on(self, timeout=5):
         deadline = time.monotonic() + timeout
 
@@ -1690,6 +1686,7 @@ class YamahaRemote(QWidget):
 
         self.connected = False
         self.action_running = False
+        self._volume_batch_count = 0
         self.last_status = None
         self.inputs = []
         self.input_settings = config["Inputs"]
@@ -1731,6 +1728,7 @@ class YamahaRemote(QWidget):
         return state
 
     def _calibration_changed(self, active):
+        self._volume_batch_count = 0
         self.calibration_active = active
         self.setEnabled(not active)
         self.poll_timer.setInterval(250 if active else POLL_INTERVAL_MS)
@@ -2089,7 +2087,7 @@ class YamahaRemote(QWidget):
         worker.signals.finished.connect(finished)
         self.pool.start(worker)
 
-    def run_action(self, action, *, background=False):
+    def run_action(self, action, *, background=False, batch_volume=False):
         if self._shutting_down or self.calibration_active:
             return False
 
@@ -2100,7 +2098,10 @@ class YamahaRemote(QWidget):
 
         def done(result):
             self.action_running = False
-            self.poll_status()
+            if batch_volume:
+                self._volume_batch_count += 1
+            if not batch_volume or not self._continue_volume_batch():
+                self.poll_status()
             self._schedule_hotkey_drain()
 
         def failed(error):
@@ -2111,6 +2112,22 @@ class YamahaRemote(QWidget):
 
         self.run_worker(action, on_result=done, on_error=failed)
         return True
+
+    def _continue_volume_batch(self):
+        # Freshness belongs to device responses, never optimistic volume steps.
+        if (self.calibration_active or self._last_status_at is None
+                or self._volume_batch_count >= VOLUME_BATCH_MAX_COMMANDS
+                or time.monotonic() - self._last_status_at >= VOLUME_BATCH_MAX_AGE_SECONDS):
+            return False
+        with self._hotkey_lock:
+            if not self._pending_hotkeys:
+                return False
+            command = self._pending_hotkeys[0]
+        if isinstance(command, tuple):
+            command, expected_input = command
+            if self.last_status.get("input") != expected_input:
+                return False
+        return command in ("volume_up", "volume_down")
 
     # ----------------------------
     # Discovery and polling
@@ -2235,6 +2252,7 @@ class YamahaRemote(QWidget):
             self.connected = True
             self.power_button.setToolTip("")
             self.last_status = status
+            self._volume_batch_count = 0
             self._status_sequence += 1
             self._last_status_at = observed_at
             self._publish_hotkey_state()
@@ -2423,7 +2441,7 @@ class YamahaRemote(QWidget):
             self.last_status["mute"] = enabled
             self.show_cached_status()
 
-    def adjust_volume(self, direction, *, background=False):
+    def adjust_volume(self, direction, *, background=False, batch_volume=False):
         if not self.last_status:
             return
 
@@ -2433,14 +2451,7 @@ class YamahaRemote(QWidget):
             else self.api.volume_up
         )
 
-        if self.run_action(action, background=background) and self.last_status.get("power") == "on":
-            self.last_status["volume"] = (
-                self.api.preview_volume(
-                    self.last_status.get("volume"),
-                    direction,
-                )
-            )
-            self.show_cached_status()
+        self.run_action(action, background=background, batch_volume=batch_volume)
 
     def select_input(self, index):
         if index < 0:
@@ -2612,7 +2623,14 @@ class YamahaRemote(QWidget):
                 return
             if self.action_running or self.poll_running or not self._pending_hotkeys:
                 return
-            command = self._pending_hotkeys.popleft()
+            refresh = bool(self._volume_batch_count and (
+                self._last_status_at is None
+                or time.monotonic() - self._last_status_at >= VOLUME_BATCH_MAX_AGE_SECONDS
+            ))
+            command = None if refresh else self._pending_hotkeys.popleft()
+        if refresh:
+            self.poll_status()
+            return
         if isinstance(command, tuple):
             command, expected_input = command
             if self.last_status.get("input") != expected_input:
@@ -2621,7 +2639,7 @@ class YamahaRemote(QWidget):
         if command == "mute":
             self.toggle_mute(background=True)
         else:
-            self.adjust_volume(1 if command == "volume_up" else -1, background=True)
+            self.adjust_volume(1 if command == "volume_up" else -1, background=True, batch_volume=True)
 
 
     def eventFilter(self, watched, event):
@@ -2845,6 +2863,7 @@ class YamahaRemote(QWidget):
         self.close()
 
     def _pause_background_work(self):
+        self._volume_batch_count = 0
         self._shutting_down = True
         if self.activation_server is not None:
             self.activation_server.close()

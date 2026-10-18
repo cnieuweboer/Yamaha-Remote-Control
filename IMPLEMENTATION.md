@@ -79,3 +79,11 @@ After failing to acquire the single-instance lock, a new process contacts the ex
 Connection retries and the handshake share a 1.5-second startup deadline. An unavailable/unresponsive endpoint produces a clear already-running message instead of a silent exit. The server allows four connected clients, bounds frames, and disconnects idle clients after one second. Activation closes before restart/shutdown draining and is recreated if restart fails; it adds no periodic device/IPC polling.
 
 `tests/test_activation.py` launches real second Python processes against isolated local endpoints and private instance locks. It covers hidden/minimized windows, modal dialogs, calibration-disabled state, concurrent launches, delayed startup, malformed/partial requests, idle timeouts, role mismatch, duplicate endpoints, and endpoint recovery. Windows foreground-permission calls are mocked; actual desktop focus behavior requires platform testing.
+
+## Queued volume status reads
+
+Queued keyboard and amplifier-IPC volume steps share bounded batches: a successful step refreshes device status when four commands have completed, the last device reading is at least one second old, or no eligible volume command remains queued. The drain also checks reading age before starting another step. These limits trigger a read; network latency can delay its completion. The existing six-second freshness limit still releases ownership if a device becomes too slow or unavailable. No timer or IPC polling was added.
+
+Volume display and IPC retain the last confirmed device value until the next response; commands do not predict volume or renew freshness. Mute, ordinary button actions, and command failures still request immediate status. Calibration uses its existing 250 ms polling independently, and session/lifecycle transitions clear the batch counter.
+
+`tests/test_volume_polling.py` checks request reduction, final refreshes, elapsed-time bounds during sustained input, route/mute boundaries, error refreshes, and calibration exclusion using a deterministic clock and worker callbacks. Physical device/network latency and Windows hook behavior still require hardware testing.

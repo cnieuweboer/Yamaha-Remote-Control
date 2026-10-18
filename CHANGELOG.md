@@ -4,6 +4,8 @@ Release identifiers below come from the corresponding commits. Some releases upd
 
 ## 2026-10-18
 
+- 2026.10.18.36 — Batch queued volume commands with status refreshes after at most four commands or one second, plus a final refresh. Keep displayed/published volume authoritative and retain immediate error refreshes and calibration polling. Add bounded-batch regression tests.
+
 - 2026.10.18.35 — Second launches restore the existing window through a separate user-local activation endpoint, including from tray/minimized state. Add bounded startup retries, Windows foreground permission, restart recovery, and cross-process regression tests.
 
 - 2026.10.18.34 — Preserve connection and cached status after rejected commands, refresh authoritative status, and retain existing offline/status-failure handling. Add focused graceful-failure regression tests.
