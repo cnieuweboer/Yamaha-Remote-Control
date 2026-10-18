@@ -17,7 +17,7 @@ from decimal import Decimal
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
-from urllib.request import urlopen
+from urllib.request import build_opener, ProxyHandler
 from PySide6.QtCore import QEvent, QFileInfo, QFileSystemWatcher, QObject, QLockFile, QProcess, QRunnable, QStandardPaths, QThreadPool, QTimer, Qt, Signal
 from PySide6.QtNetwork import QLocalServer
 from PySide6.QtGui import QAction, QColor, QIcon, QPalette
@@ -36,6 +36,10 @@ from PySide6.QtWidgets import (
     QSystemTrayIcon,
     QWidget,
 )
+
+
+# Device requests connect directly; never forward LAN traffic or credentials to a proxy.
+DEVICE_HTTP_OPENER = build_opener(ProxyHandler({}))
 
 
 # ----------------------------
@@ -293,7 +297,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.18.27"
+__version__ = "2026.10.18.28"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -1331,7 +1335,7 @@ class YamahaApi:
 
     def _get_json(self, path, timeout=NETWORK_TIMEOUT_SECONDS):
         try:
-            with urlopen(
+            with DEVICE_HTTP_OPENER.open(
                 f"{self.base_url}/{path}",
                 timeout=timeout,
             ) as response:
