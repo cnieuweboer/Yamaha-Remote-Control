@@ -55,7 +55,7 @@ class EndpointTests(unittest.TestCase):
         for role in ("tv", "amplifier"):
             for calibration in (False, True):
                 expected = f"remote-control.{role}{'.calibration' if calibration else ''}.v1.{suffix}"
-                self.assertEqual(REMOTE["ipc_server_name"](role, calibration=calibration), expected)
+                self.assertEqual(REMOTE["ipc_server_name"](role, channel="calibration" if calibration else None), expected)
         self.assertEqual(REMOTE["IPC_SERVER_NAME"], REMOTE["ipc_server_name"]("amplifier"))
 
 

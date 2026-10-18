@@ -77,7 +77,9 @@ For example:
 
 means that a volume value of `100` is displayed as `-47.0 dB`.
 
-The app automatically restart when it detects the json file is changed.
+The app automatically restarts when `YamahaRemote.json` changes.
+
+Launching Yamaha Remote again restores its existing window, including from the system tray.
 
 Regular status polling pauses while the window is hidden or minimized and refreshes immediately when restored, unless Windows global volume hotkeys are enabled and their hook is installed, or a local TV remote is connected through IPC. In that case, the existing polling timer continues while hidden, including in standby or offline, so external power changes and reconnections can be detected. Active requests finish normally; configuration file watching remains enabled.
 
