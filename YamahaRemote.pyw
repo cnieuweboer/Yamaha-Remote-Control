@@ -433,7 +433,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.19.1"
+__version__ = "2026.10.19.2"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -767,26 +767,24 @@ def load_config():
     return validate_config(raw_config, allow_incomplete=True)
 
 
-def save_config(config):
-    script_path = Path(__file__).resolve()
-    config_path = CONFIG_PATH
-    temp_path = config_path.with_suffix(config_path.suffix + ".tmp")
-
+def save_config(config, *, expected_digest=None):
+    content = (json.dumps(config, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+    temp_path = CONFIG_PATH.with_name(CONFIG_PATH.name + ".tmp")
     try:
-        temp_path.write_text(
-            json.dumps(config, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
-        temp_path.replace(config_path)
+        temp_path.write_bytes(content)
+        # Discovery must not replace unapplied edits, including invalid JSON.
+        # Check after preparing the replacement to minimize the edit/save race.
+        if expected_digest is not None and _file_sha256(CONFIG_PATH) != expected_digest:
+            return None
+        os.replace(temp_path, CONFIG_PATH)
+        return hashlib.sha256(content).digest()
     except OSError as ex:
+        raise ConfigError(f"Unable to update {CONFIG_PATH.name}: {ex}") from ex
+    finally:
         try:
             temp_path.unlink(missing_ok=True)
         except OSError:
             pass
-
-        raise ConfigError(
-            f"Unable to update {config_path.name}: {ex}"
-        ) from ex
 
 
 def _file_snapshot(path):
@@ -2752,10 +2750,13 @@ class YamahaRemote(QWidget):
         self._restart_for_config_change()
 
     def _save_config_without_restart(self):
-        if self._restart_failed:
+        # A failed restart or unknown baseline must never authorize a save.
+        if self._restart_failed or self._config_digest is None:
             return
-        save_config(self.config)
-        self._config_digest = self._get_config_digest()
+        digest = save_config(self.config, expected_digest=self._config_digest)
+        if digest is not None:
+            # Use our own bytes; a later user edit must remain detectable.
+            self._config_digest = digest
         self._watch_config_paths()
 
     def _restart_for_config_change(self):
