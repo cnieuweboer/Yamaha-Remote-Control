@@ -133,9 +133,9 @@ class AmplifierServer(QObject):
                         or not isinstance(message.get("input"), str)
                         or message.get("command") not in ("volume_up", "volume_down", "mute")):
                     raise ValueError("Invalid local command")
-                accepted = self.command(message["command"], message["input"])
+                accepted, reason = self.command(message["command"], message["input"])
                 self._send(socket, {"version": 1, "type": "ack", "id": message["id"],
-                                    "accepted": accepted})
+                                    "accepted": accepted, "reason": reason})
         except (ValueError, UnicodeError, KeyError):
             socket.abort()
 
@@ -293,7 +293,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.18.25"
+__version__ = "2026.10.18.26"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -2385,9 +2385,10 @@ class YamahaRemote(QWidget):
         if (self.calibration_active or not expected_input or not self._volume_hotkeys_eligible()
                 or self.last_status.get("input") != expected_input
                 or QApplication.activeModalWidget() is not None):
-            return False
+            return False, "state_changed"
         with self._hotkey_lock:
-            return self._enqueue_hotkey_locked((command, expected_input))
+            accepted = self._enqueue_hotkey_locked((command, expected_input))
+            return accepted, "" if accepted else "queue_full"
 
     def _native_hotkey_changed(self, installed, error):
         if self._shutting_down:
