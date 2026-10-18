@@ -64,24 +64,29 @@ def _ipc_encode(message):
 
 
 def _ipc_frames(socket, buffer):
-    # Bound reads even if another local process sends an oversized frame.
-    buffer.extend(bytes(socket.read(IPC_MAX_FRAME + 1)))
     messages = []
-    while b"\n" in buffer:
-        frame, _, tail = buffer.partition(b"\n")
-        buffer[:] = tail
-        if len(frame) > IPC_MAX_FRAME:
+    while socket.bytesAvailable():
+        # Parse between bounded reads so a burst of valid frames is allowed,
+        # without allowing an oversized complete or partial frame.
+        chunk = bytes(socket.read(IPC_MAX_FRAME + 1))
+        if not chunk:
+            break
+        buffer.extend(chunk)
+        while b"\n" in buffer:
+            frame, _, tail = buffer.partition(b"\n")
+            buffer[:] = tail
+            if len(frame) > IPC_MAX_FRAME:
+                raise ValueError("Local protocol frame too large")
+            try:
+                message = json.loads(frame)
+            except RecursionError as error:
+                raise ValueError("Local protocol nesting too deep") from error
+            if (not isinstance(message, dict) or type(message.get("version")) is not int
+                    or message["version"] != 1):
+                raise ValueError("Unsupported local protocol message")
+            messages.append(message)
+        if len(buffer) > IPC_MAX_FRAME:
             raise ValueError("Local protocol frame too large")
-        try:
-            message = json.loads(frame)
-        except RecursionError as error:
-            raise ValueError("Local protocol nesting too deep") from error
-        if (not isinstance(message, dict) or type(message.get("version")) is not int
-                or message["version"] != 1):
-            raise ValueError("Unsupported local protocol message")
-        messages.append(message)
-    if len(buffer) > IPC_MAX_FRAME:
-        raise ValueError("Local protocol frame too large")
     return messages
 
 
@@ -303,7 +308,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.18.31"
+__version__ = "2026.10.18.33"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -657,11 +662,16 @@ def save_config(config):
         ) from ex
 
 
-def _file_sha256(path):
+def _file_snapshot(path):
     try:
-        return hashlib.sha256(path.read_bytes()).digest()
+        content = path.read_bytes()
     except OSError:
-        return None
+        return None, None
+    return content, hashlib.sha256(content).digest()
+
+
+def _file_sha256(path):
+    return _file_snapshot(path)[1]
 
 
 # ----------------------------
@@ -691,7 +701,7 @@ class _WindowsSingleInstanceMutex:
     def __init__(self, name):
         self.handle = None
         self.kernel32 = None
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=False)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
         kernel32.CreateMutexW.argtypes = [
             ctypes.c_void_p,
@@ -700,20 +710,17 @@ class _WindowsSingleInstanceMutex:
         ]
         kernel32.CreateMutexW.restype = ctypes.c_void_p
 
-        kernel32.GetLastError.argtypes = []
-        kernel32.GetLastError.restype = ctypes.c_ulong
-
         kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
         kernel32.CloseHandle.restype = ctypes.c_bool
 
+        ctypes.set_last_error(0)
         handle = kernel32.CreateMutexW(
             None,
             False,
             name,
         )
 
-        # GetLastError must be read immediately after CreateMutexW.
-        error = kernel32.GetLastError()
+        error = ctypes.get_last_error()
 
         if not handle:
             raise OSError(
@@ -2338,8 +2345,10 @@ class YamahaRemote(QWidget):
 
     def _amplifier_snapshot(self):
         status = self.last_status or {}
-        age = time.monotonic() - self._last_status_at if self._last_status_at is not None else 6
-        valid_for = max(0, min(6000, int((6 - age) * 1000)))
+        age = (time.monotonic() - self._last_status_at
+               if self._last_status_at is not None else HOTKEY_STATE_MAX_AGE_SECONDS)
+        valid_for = max(0, min(int(HOTKEY_STATE_MAX_AGE_SECONDS * 1000),
+                               int((HOTKEY_STATE_MAX_AGE_SECONDS - age) * 1000)))
         def raw(key):
             value = status.get(key)
             return value if type(value) in (int, float) and math.isfinite(value) else None
@@ -2572,15 +2581,13 @@ class YamahaRemote(QWidget):
             return
         self._watch_config_paths()
 
-        new_hash = _file_sha256(CONFIG_PATH)
+        content, new_hash = _file_snapshot(CONFIG_PATH)
 
         if new_hash is None or new_hash == self._config_digest:
             return
 
         try:
-            raw_config = json.loads(
-                CONFIG_PATH.read_text(encoding="utf-8")
-            )
+            raw_config = json.loads(content.decode("utf-8"))
             validate_config(raw_config)
         except (OSError, ValueError) as ex:
             if new_hash != self._invalid_config_digest:

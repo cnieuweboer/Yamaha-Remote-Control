@@ -4,6 +4,8 @@ Release identifiers below come from the corresponding commits. Some releases upd
 
 ## 2026-10-18
 
+- 2026.10.18.33 — Drain IPC reads with frame bounds, use cached Win32 mutex errors, hash/validate the same configuration bytes, and derive published freshness from the hotkey age constant. Add focused reliability regression tests.
+
 - 2026.10.18.31 — Derive configuration validation from defaults, initialize persistent state explicitly, centralize local endpoint naming, and add development-only regression tests. Scripts remain self-contained; IPC names and calibration file format are unchanged.
 
 - 2026.10.18.28 — Bypass system/environment proxies for device requests using a dedicated direct-connection opener.

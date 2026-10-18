@@ -55,3 +55,11 @@ python -m unittest discover -s tests -v
 ```
 
 These development-only tests do not require real devices and are not imported by the applications. Each script remains independently runnable without the tests or a shared module. Endpoint naming is centralized locally in `ipc_server_name`; the user-local socket names and wire protocol are unchanged.
+
+## Small reliability checks
+
+IPC frame readers drain available socket data in bounded chunks, preserving incomplete frames and enforcing the 4,096-byte limit per frame rather than per burst. Configuration-change checks hash and parse the same byte snapshot. Sony applies the same rule to calibration-file reloads, retaining its last valid mapping after a malformed edit.
+
+Windows mutex creation uses `WinDLL(..., use_last_error=True)` and the ctypes cached last-error value immediately after `CreateMutexW`. Handle release retains pointer-sized signatures. Yamaha’s published freshness uses its existing hotkey age constant; no protocol or freshness-policy change is introduced.
+
+`tests/test_reliability.py` covers fragmented UTF-8, multi-read bursts, frame-size boundaries, invalid frames, changing/unreadable configuration files, and mocked Win32 mutex success/existing/error paths. Native Windows mutex behavior still requires Windows testing.
