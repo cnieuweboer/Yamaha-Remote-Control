@@ -31,6 +31,8 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
+    QProxyStyle,
+    QStyle,
     QSystemTrayIcon,
     QWidget,
 )
@@ -291,7 +293,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.18.24"
+__version__ = "2026.10.18.25"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -692,6 +694,19 @@ def _file_sha256(path):
 # ----------------------------
 # Platform integration
 # ----------------------------
+
+
+class TooltipDelayStyle(QProxyStyle):
+    def styleHint(self, hint, option=None, widget=None, returnData=None):
+        if hint == QStyle.SH_ToolTip_WakeUpDelay:
+            return 1000
+        if hint == QStyle.SH_ToolTip_FallAsleepDelay:
+            # Moving between controls must still require a full hover delay.
+            return 0
+        return super().styleHint(hint, option, widget, returnData)
+
+
+
 
 
 _instance_lock = None
@@ -2825,6 +2840,7 @@ def launch_replacement():
 
 def _run_application():
     app = QApplication(sys.argv)
+    app.setStyle(TooltipDelayStyle())
 
     try:
         acquired = acquire_single_instance()

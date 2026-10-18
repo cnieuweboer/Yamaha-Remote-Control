@@ -4,6 +4,8 @@ Release identifiers below come from the corresponding commits. Some releases upd
 
 ## 2026-10-18
 
+- 2026.10.18.25 — Require one second of hovering before showing tooltips, including when moving between controls.
+
 - 2026.10.18.24 — Show keyboard shortcuts in button hover tooltips.
 
 - 2026.10.18.19 — Share Yamaha’s formatted volume and unit over IPC; Sony mirrors them when no calibration matches. Update both remotes together.
