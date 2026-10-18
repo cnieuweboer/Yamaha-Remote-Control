@@ -291,7 +291,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.18.5"
+__version__ = "2026.10.18.10"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -2354,7 +2354,9 @@ class YamahaRemote(QWidget):
         def raw(key):
             value = status.get(key)
             return value if type(value) in (int, float) and math.isfinite(value) else None
-        return {"version": 1, "type": "state", "online": bool(self.connected and not self._shutting_down),
+        return {"version": 1, "type": "state",
+                "device_id": hashlib.sha256(self.config["Host"].casefold().encode()).hexdigest(),
+                "online": bool(self.connected and not self._shutting_down),
                 "power": status.get("power") if status.get("power") in ("on", "standby") else None,
                 "input": status.get("input") if isinstance(status.get("input"), str) else None,
                 "raw_volume": raw("volume"),

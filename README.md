@@ -104,7 +104,7 @@ The existing two-second device polling continues while a TV client is connected,
 
 The generic `remote-control.amplifier.v1.<user-suffix>` endpoint uses `QLocalServer` / `QLocalSocket` with user-only access, a role lock, versioned newline-delimited JSON, bounded frames, and bounded command queues. State messages carry `online`, `power`, `input`, `raw_volume`, `raw_max_volume`, `mute`, `global_hotkeys_enabled`, `global_hotkeys_active`, and a remaining freshness lease in `valid_for_ms`. Status freshness is measured from the device response, not socket delivery. Commands are limited to `volume_up`, `volume_down`, and `mute`, and include the expected amplifier input. Input and availability are checked before queueing and again before execution. Acknowledgements confirm queue acceptance; later device failures follow the amplifier's normal background error handling.
 
-`raw_max_volume` describes the network control interface's ceiling, not the amplifier's physical maximum. No TV-scale conversion, volume-setting synchronization back to the TV, or calibration is performed in this release. Sony displays the amplifier's raw value while routing, with a source tooltip. Two-point calibration, caps, and alternative mappings remain a later step.
+`raw_max_volume` describes the network control interface's ceiling, not the amplifier's physical maximum. Sony uses a matching calibration file for TV-scale display, including the observed range cap, and otherwise shows amplifier raw volume. It does not write a converted value back to the TV. A separate helper measures the shared observable range; see the calibration section below.
 
 ## Calibration helper — session and restoration stage
 
@@ -112,7 +112,7 @@ Release `2026.10.18.5` adds exclusive calibration sessions. Update **both** remo
 
 During a session, both remotes reuse their existing polling timers at 250 ms, including while hidden. Ordinary controls are disabled and pending volume targets are cleared. Yamaha's Windows hook consumes volume/mute media keys without issuing device commands, so they cannot unmute Windows or change volume during the test. Config-driven restarts wait until the session ends. A socket-owned eight-second lease, renewed by the helper, restores normal polling and controls on release, disconnect, or helper failure. Only the owner can perform calibration operations; API work stays in the existing device workers.
 
-The helper first captures the selected amplifier input through IPC. This stage does not change `AmplifierTVInput`, save a volume mapping, or apply a new routing configuration. Existing routing remains unchanged. The next stage will save the verified input, device pairing, usable range, and mapping in the separate calibration JSON.
+Release `2026.10.18.10` adds full upward/downward sweeps, mapping storage, and a results table to the helper. Update both remotes and `VolumeCalibration.pyw`. The helper captures the TV input and observations in a separate `VolumeCalibration.json`; Sony automatically uses a matching device-pair mapping for input routing and TV-scale volume display, retaining `AmplifierTVInput` as fallback. Yamaha only publishes its own state and configured-endpoint identity; it does not read the mapping or Sony settings. The helper stops upward commands at the first API ceiling reading, restores the saved states, and only then publishes the mapping. See the Sony repository README for silent-source requirements, bounds, recovery, and result interpretation.
 
 ## Third-party code
 
