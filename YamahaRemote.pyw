@@ -433,7 +433,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.19.4"
+__version__ = "2026.10.19.6"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -508,15 +508,6 @@ def _validate_number(value, key):
         )
 
     return value
-
-
-def _require_number(config, key):
-    if key not in config:
-        raise ConfigError(
-            f'"{key}" is required when "VolumeDb" is true.'
-        )
-
-    return _validate_number(config[key], key)
 
 
 def _validate_host(value):
@@ -687,39 +678,12 @@ def validate_config(raw_config, *, allow_incomplete=False):
     for key in BOOLEAN_CONFIG_KEYS:
         config[key] = _require_bool(config, key, DEFAULT_CONFIG[key])
 
-    if config["VolumeDb"]:
-        for key in ("VolumeDbAtZero", "VolumeDbStepSize"):
-            _require_number(raw_config, key)
-        config["VolumeDbAtZero"] = _require_number(
-            config,
-            "VolumeDbAtZero",
-        )
-        config["VolumeDbStepSize"] = _require_number(
-            config,
-            "VolumeDbStepSize",
-        )
-
-        if config["VolumeDbStepSize"] <= 0:
-            raise ConfigError(
-                '"VolumeDbStepSize" must be greater than 0.'
-            )
-    else:
-        if "VolumeDbAtZero" in config:
-            config["VolumeDbAtZero"] = _validate_number(
-                config["VolumeDbAtZero"],
-                "VolumeDbAtZero",
-            )
-
-        if "VolumeDbStepSize" in config:
-            config["VolumeDbStepSize"] = _validate_number(
-                config["VolumeDbStepSize"],
-                "VolumeDbStepSize",
-            )
-
-            if config["VolumeDbStepSize"] <= 0:
-                raise ConfigError(
-                    '"VolumeDbStepSize" must be greater than 0.'
-                )
+    for key in ("VolumeDbAtZero", "VolumeDbStepSize"):
+        if config["VolumeDb"] and key not in raw_config:
+            raise ConfigError(f'"{key}" is required when "VolumeDb" is true.')
+        config[key] = _validate_number(config[key], key)
+    if config["VolumeDbStepSize"] <= 0:
+        raise ConfigError('"VolumeDbStepSize" must be greater than 0.')
 
     if config["CloseToTray"] and not config["SystemTray"]:
         raise ConfigError(

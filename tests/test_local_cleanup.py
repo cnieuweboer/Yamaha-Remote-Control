@@ -39,6 +39,34 @@ class ConfigurationTests(unittest.TestCase):
         api = REMOTE["YamahaApi"]("127.0.0.1", result)
         self.assertEqual(api.format_volume(100), "-47.0 dB")
 
+    def test_db_numeric_rules_apply_with_display_enabled_or_disabled(self):
+        for enabled in (False, True):
+            for key in ('VolumeDbAtZero', 'VolumeDbStepSize'):
+                for value in (True, False, None, '0.5', [], {}, float('nan'), float('inf'), -float('inf')):
+                    with self.subTest(enabled=enabled, key=key, value=value):
+                        document = {'VolumeDb': enabled, 'VolumeDbAtZero': -97, 'VolumeDbStepSize': 0.5}
+                        document[key] = value
+                        with self.assertRaises(REMOTE['ConfigError']):
+                            REMOTE['validate_config'](document, allow_incomplete=True)
+            for step in (0, -0.5):
+                with self.subTest(enabled=enabled, step=step):
+                    with self.assertRaisesRegex(REMOTE['ConfigError'], 'must be greater than 0'):
+                        REMOTE['validate_config']({'VolumeDb': enabled, 'VolumeDbAtZero': -97,
+                                                  'VolumeDbStepSize': step}, allow_incomplete=True)
+
+    def test_db_settings_keep_numeric_normalization_and_explicit_requirements(self):
+        for enabled in (False, True):
+            document = {'VolumeDb': enabled, 'VolumeDbAtZero': -97, 'VolumeDbStepSize': 1}
+            config = REMOTE['validate_config'](document, allow_incomplete=True)
+            self.assertIs(type(config['VolumeDbAtZero']), float)
+            self.assertIs(type(config['VolumeDbStepSize']), float)
+        for key in ('VolumeDbAtZero', 'VolumeDbStepSize'):
+            document = {'VolumeDb': True, 'VolumeDbAtZero': -97, 'VolumeDbStepSize': 0.5}
+            del document[key]
+            with self.subTest(missing=key):
+                with self.assertRaisesRegex(REMOTE['ConfigError'], f'"{key}" is required'):
+                    REMOTE['validate_config'](document, allow_incomplete=True)
+
     def test_tray_dependency_and_ip_validation_unchanged(self):
         for document in ({"CloseToTray": True, "SystemTray": False},
                          {"Host": "192.168.1.1000"}, {"Host": "300.1.1.1"}):
