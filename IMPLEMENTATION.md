@@ -87,3 +87,9 @@ Queued keyboard and amplifier-IPC volume steps share bounded batches: a successf
 Volume display and IPC retain the last confirmed device value until the next response; commands do not predict volume or renew freshness. Mute, ordinary button actions, and command failures still request immediate status. Calibration uses its existing 250 ms polling independently, and session/lifecycle transitions clear the batch counter.
 
 `tests/test_volume_polling.py` checks request reduction, final refreshes, elapsed-time bounds during sustained input, route/mute boundaries, error refreshes, and calibration exclusion using a deterministic clock and worker callbacks. Physical device/network latency and Windows hook behavior still require hardware testing.
+
+## Hook startup shutdown safeguard
+
+The hook thread checks its existing stop flag after native message-queue setup and before installation. If shutdown arrives during installation, the thread skips the started notification once it observes the flag and immediately follows its existing unhook cleanup path. Running hooks still use `WM_QUIT` to wake the native message loop. Worker draining, join limits, and restart behavior are unchanged.
+
+`tests/test_hook_lifecycle.py` uses real Python threads with a fake Win32 API and event barriers to force shutdown before thread-ID publication and during hook installation. It also checks normal message-loop shutdown, repeated stop calls, and stopping before start. These tests exercise lifecycle ordering without relying on randomly hitting a race; actual Windows API behavior still requires Windows testing.

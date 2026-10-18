@@ -433,7 +433,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.18.36"
+__version__ = "2026.10.19.1"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -1162,6 +1162,9 @@ class _WindowsVolumeHook(QObject):
             message = _NativeMessage()
             self._user32.PeekMessageW(ctypes.byref(message), None, 0, 0, 0)
             self._thread_id = kernel32.GetCurrentThreadId()
+            # stop() can arrive before the native thread has finished startup.
+            if self._stopping.is_set():
+                return
             # Do not seize keys that were already held when the app started.
             self._keys.pressed = {
                 key: False for key in _VOLUME_KEYS
@@ -1173,7 +1176,8 @@ class _WindowsVolumeHook(QObject):
             )
             if not self._hook:
                 raise ctypes.WinError()
-            self._notify(True)
+            if not self._stopping.is_set():
+                self._notify(True)
             while not self._stopping.is_set():
                 result = self._user32.GetMessageW(ctypes.byref(message), None, 0, 0)
                 if result == 0:
