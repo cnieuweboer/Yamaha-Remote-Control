@@ -433,7 +433,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.19.2"
+__version__ = "2026.10.19.4"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -1744,18 +1744,12 @@ class YamahaRemote(QWidget):
         if self._shutting_down or missing_config_settings(self.config):
             done(False, "Device configuration is missing or the app is shutting down.")
             return
-        if action not in ("acquire", "set_mute", "set_volume"):
+        if action != "acquire":
             done(False, "Unsupported calibration operation.")
             return
-        if action == "set_volume":
-            done(False, "Calibration changes volume through the TV only.")
-            return
-        if (action == "acquire" and sys.platform == "win32"
+        if (sys.platform == "win32"
                 and (self._native_volume_hook is None or not self._native_volume_hook.installed)):
             done(False, "The amplifier's native volume hook must be available for calibration.")
-            return
-        if action == "set_mute" and type(args.get("value")) is not bool:
-            done(False, "Mute must be true or false.")
             return
         self._calibration_operation = True
         token = self.calibration_server.token
@@ -1774,11 +1768,7 @@ class YamahaRemote(QWidget):
                 else:
                     QTimer.singleShot(25, ready)
                 return
-            if action == "acquire":
-                finish(True)
-                return
-            self.run_worker(lambda: self.api.set_mute(args["value"]), on_result=lambda _: finish(True),
-                            on_error=lambda error: finish(False, f"{type(error).__name__}: {error}"))
+            finish(True)
         ready()
 
     def _setup_timers(self):

@@ -101,3 +101,9 @@ Automatic discovery writes use the last accepted file digest as their baseline. 
 Successful saves return the digest of the exact UTF-8 bytes written, rather than re-reading the destination. An edit made after replacement therefore remains detectable. Default-file creation still works without an existing baseline. Both scripts retain their own implementation and atomic replacement; no shared module or additional polling is introduced.
 
 `tests/test_reliability.py` covers ordinary discovery saves, valid and unfinished edits, deletion/read failures, edits during replacement preparation and immediately after replacement, failed-restart protection, failed replacement cleanup, and initial default-file creation. Temporary files isolate every write.
+
+## Amplifier calibration operations
+
+The amplifier calibration handler supports acquisition only: it verifies native hook availability on Windows and waits for pending device work to drain before acknowledging. The calibration server handles lease renewal/release, and existing polling publishes observations. All calibration volume changes and mute restoration are performed through the TV; ordinary amplifier mute/volume controls retain their existing behavior.
+
+`tests/test_calibration_acquisition.py` checks successful acquisition without device mutations, pending worker/thread draining, timeout and lost-session failures, missing-hook/configuration/shutdown rejection, and rejection of unsupported calibration mutations. The helper does not require an update.
