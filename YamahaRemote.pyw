@@ -19,7 +19,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import urlopen
 from PySide6.QtCore import QEvent, QFileInfo, QFileSystemWatcher, QObject, QLockFile, QProcess, QRunnable, QStandardPaths, QThreadPool, QTimer, Qt, Signal
-from PySide6.QtNetwork import QLocalServer, QLocalSocket
+from PySide6.QtNetwork import QLocalServer
 from PySide6.QtGui import QAction, QColor, QIcon, QPalette
 from PySide6.QtWidgets import (
     QApplication,
@@ -291,7 +291,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.18.10"
+__version__ = "2026.10.18.15"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -1284,7 +1284,6 @@ def _decimal_places(value):
 
 class YamahaApi:
     def __init__(self, host, config=None):
-        self.host = host
         self.config = config or {}
 
         try:
@@ -1310,7 +1309,7 @@ class YamahaApi:
         else:
             self.volume_db_decimals = 0
 
-    def _get_json(self, path, timeout=2):
+    def _get_json(self, path, timeout=NETWORK_TIMEOUT_SECONDS):
         try:
             with urlopen(
                 f"{self.base_url}/{path}",
@@ -1338,7 +1337,7 @@ class YamahaApi:
 
         return data
 
-    def get_status(self, timeout=2):
+    def get_status(self, timeout=NETWORK_TIMEOUT_SECONDS):
         return self._get_json(
             "main/getStatus",
             timeout=timeout,
@@ -1547,7 +1546,6 @@ class YamahaRemote(QWidget):
         self.calibration_active = False
         self._calibration_operation = False
         self._status_sequence = 0
-        self._status_observed_at = 0
         self.calibration_server = None
         self.mica_enabled = bool(config["Mica"] and supports_mica())
         self.api = YamahaApi(config["Host"], config)
@@ -1604,8 +1602,6 @@ class YamahaRemote(QWidget):
     def _calibration_snapshot(self):
         state = self._amplifier_snapshot()
         state.update(sample_id=self._status_sequence, role="amplifier")
-        state.update(calibration_active=self.calibration_active,
-                     device_id=hashlib.sha256(self.config["Host"].casefold().encode()).hexdigest())
         return state
 
     def _calibration_changed(self, active):
@@ -1655,8 +1651,7 @@ class YamahaRemote(QWidget):
             if action == "acquire":
                 finish(True)
                 return
-            function = (lambda: self.api.set_mute(args["value"])) if action == "set_mute" else (lambda: self.api.set_volume(args["value"]))
-            self.run_worker(function, on_result=lambda _: finish(True),
+            self.run_worker(lambda: self.api.set_mute(args["value"]), on_result=lambda _: finish(True),
                             on_error=lambda error: finish(False, f"{type(error).__name__}: {error}"))
         ready()
 
@@ -2112,7 +2107,6 @@ class YamahaRemote(QWidget):
             self.power_button.setToolTip("")
             self.last_status = status
             self._status_sequence += 1
-            self._status_observed_at = observed_at
             self._last_status_at = observed_at
             self._publish_hotkey_state()
             self.show_cached_status()
