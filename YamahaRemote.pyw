@@ -291,7 +291,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.18.15"
+__version__ = "2026.10.18.19"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -2354,6 +2354,8 @@ class YamahaRemote(QWidget):
                 "power": status.get("power") if status.get("power") in ("on", "standby") else None,
                 "input": status.get("input") if isinstance(status.get("input"), str) else None,
                 "raw_volume": raw("volume"),
+                "volume_display": self.api.format_volume(raw("volume")),
+                "volume_unit": "dB" if self.config["VolumeDb"] else "raw",
                 "raw_max_volume": raw("max_volume"),
                 "mute": status.get("mute") if type(status.get("mute")) is bool else None,
                 "global_hotkeys_enabled": self.config["GlobalVolumeHotkeys"],

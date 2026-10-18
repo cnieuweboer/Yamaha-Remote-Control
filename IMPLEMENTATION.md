@@ -33,3 +33,7 @@ During a session, both remotes reuse their existing polling timers at 250 ms, in
 The amplifier publishes raw state and configured-endpoint identity; it does not read the calibration mapping or Sony settings. The API ceiling is a control-interface limit, not the physical amplifier maximum.
 
 See the [Sony implementation details](https://github.com/cnieuweboer/Sony-Remote-Control/blob/main/IMPLEMENTATION.md) for sweep behavior, restoration, and mapping storage.
+
+## Amplifier volume display
+
+State includes `volume_display` (the exact text from the existing amplifier formatter, including any dB suffix) and `volume_unit` (`raw` or `dB`). Sony uses these only without a matching calibration; calibrated display and calibration still use `raw_volume`. Sony validates the display fields without converting dB. Update both remotes together for these required fields.

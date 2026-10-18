@@ -4,6 +4,8 @@ Release identifiers below come from the corresponding commits. Some releases upd
 
 ## 2026-10-18
 
+- 2026.10.18.19 — Share Yamaha’s formatted volume and unit over IPC; Sony mirrors them when no calibration matches. Update both remotes together.
+
 - [2026.10.18.15](https://github.com/cnieuweboer/Yamaha-Remote-Control/commit/a288584) — Remove obsolete calibration state and branches in Yamaha Remote 2026.10.18.15.
 - [2026.10.18.10](https://github.com/cnieuweboer/Yamaha-Remote-Control/commit/1f11e23) — Publish amplifier identity for calibrated routing in version 2026.10.18.10.
 - [2026.10.18.5](https://github.com/cnieuweboer/Yamaha-Remote-Control/commit/9a3c5b5) — Add exclusive calibration sessions and temporary polling for version 2026.10.18.5.
