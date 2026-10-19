@@ -436,7 +436,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.19.16"
+__version__ = "2026.10.19.17"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -1976,8 +1976,7 @@ class YamahaRemote(QWidget):
 
         volume_row = QGridLayout()
         volume_row.setSpacing(6)
-        # Match the TV remote's outer/section insets within our 10 px margins.
-        volume_row.setContentsMargins(12, 0, 12, 0)
+        volume_row.setContentsMargins(0, 0, 0, 0)
         for column in range(3):
             volume_row.setColumnStretch(column, 1)
         volume_row.addWidget(self.volume_down, 0, 0)

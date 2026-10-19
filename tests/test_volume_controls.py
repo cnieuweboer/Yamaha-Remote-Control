@@ -53,6 +53,8 @@ class VolumeControlTests(unittest.TestCase):
             widths = [widget.width() for widget in
                       (window.volume_down, window.volume_value, window.volume_up)]
             self.assertLessEqual(max(widths) - min(widths), 1)
+            self.assertEqual(window.volume_down.geometry().left(), window.mute_button.geometry().left())
+            self.assertEqual(window.volume_up.geometry().right(), window.power_button.geometry().right())
             self.assertEqual(window.volume_down.height(), 34)
             self.assertEqual(window.volume_up.height(), 34)
             window.hide()
