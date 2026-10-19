@@ -111,3 +111,9 @@ The amplifier calibration handler supports acquisition only: it verifies native 
 ## dB configuration validation
 
 Both conversion settings use the same numeric validation path whether dB display is enabled or disabled. Enabling dB display still requires both settings explicitly in the JSON; otherwise missing values use the existing defaults. Values must be finite numbers, and the step size must be positive. `tests/test_local_cleanup.py` covers both display modes, invalid numeric values, normalization, explicit-setting requirements, and formatted output.
+
+## Starting in the system tray
+
+`--start-in-tray` leaves the newly constructed window hidden when both `SystemTray` and `CloseToTray` are true, an icon was created, and the tray is still available. It never shows/minimizes the main window first. Initialization, configuration feedback, IPC, and visibility-aware polling retain their existing paths; Yamaha global control or connected TV clients can still keep hidden-window polling active. Missing/disabled tray support falls back to an ordinary visible window.
+
+The switch is checked after single-instance activation, so a second launch restores the existing window regardless of the flag. Configuration-driven replacement already forwards command-line arguments and retains the switch. `tests/test_tray_startup.py` checks the visibility/fallback gates, startup feedback, and argument forwarding without live tray icons or devices; `tests/test_activation.py` also exercises a real second process with the switch.

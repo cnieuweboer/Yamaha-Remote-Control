@@ -433,7 +433,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.19.6"
+__version__ = "2026.10.19.9"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -3000,7 +3000,13 @@ def _run_application():
     app.setQuitOnLastWindowClosed(window.tray is None)
     app.aboutToQuit.connect(window._shutdown)
     show_missing_config_settings(config)
-    window.show()
+    if ("--start-in-tray" in sys.argv[1:]
+            and config["SystemTray"] and config["CloseToTray"]
+            and window.tray is not None and QSystemTrayIcon.isSystemTrayAvailable()):
+        # A new window is already hidden: do not show it even for one frame.
+        window._update_polling_state()
+    else:
+        window.show()
 
     try:
         return app.exec()
