@@ -4,6 +4,8 @@ Release identifiers below come from the corresponding commits. Some releases upd
 
 ## 2026-10-19
 
+- 2026.10.19.18 — Increase the input combobox height from 30 to 34 pixels to match the buttons. Verify that fitted window height grows by exactly 4 pixels in both light and dark themes.
+
 - 2026.10.19.17 — Remove extra side insets from the volume row so the −/+ buttons align with the outer edges of the mute/power buttons above. Check alignment in both themes.
 
 - 2026.10.19.16 — Reduce client width from 330 to 303 pixels, matching the supplied Sony width of 305 pixels overall with the reference Windows border. Restyle the volume row with equal columns, compact −/+ labels, and 13-point semibold volume text; preserve raw/dB conversion. Add immediate volume-button presses and repeat after 500 ms at 100 ms intervals, without a release step. Add offscreen geometry and hold/release regression coverage.

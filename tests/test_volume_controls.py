@@ -62,6 +62,25 @@ class VolumeControlTests(unittest.TestCase):
             self.app.processEvents()
             self.assertEqual(window.width(), 303)
 
+    def test_input_height_matches_buttons_and_adds_four_pixels_to_window(self):
+        for dark in (False, True):
+            with self.subTest(dark=dark):
+                window = self.window(dark)
+                self.assertEqual(window.input_combo.height(), 34)
+                self.assertEqual(window.input_combo.height(), window.power_button.height())
+                new_height = window.height()
+                window.input_combo.setMinimumHeight(30)
+                window.main_layout.invalidate()
+                window._fit_and_lock_window()
+                self.app.processEvents()
+                self.assertEqual(window.input_combo.height(), 30)
+                self.assertEqual(window.height(), new_height - 4)
+                window.input_combo.setMinimumHeight(34)
+                window.main_layout.invalidate()
+                window._fit_and_lock_window()
+                self.app.processEvents()
+                self.assertEqual(window.height(), new_height)
+
     def test_press_is_immediate_hold_repeats_and_release_adds_no_step(self):
         window = self.window()
         for button, direction in ((window.volume_down, -1), (window.volume_up, 1)):
