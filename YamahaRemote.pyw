@@ -436,7 +436,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.19.18"
+__version__ = "2026.10.19.19"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -1734,7 +1734,17 @@ class CenteredComboBox(QComboBox):
         option = QStyleOptionComboBox()
         self.initStyleOption(option)
 
+        # Let the styled control paint its frame without a separate arrow button.
+        option.subControls &= ~QStyle.SC_ComboBoxArrow
         painter.drawComplexControl(QStyle.CC_ComboBox, option)
+        arrow = QStyleOptionComboBox(option)
+        arrow_rect = self.style().subControlRect(
+            QStyle.CC_ComboBox, option, QStyle.SC_ComboBoxArrow, self)
+        arrow.rect = QRect(0, 0, 12, 12)
+        arrow.rect.moveCenter(arrow_rect.center())
+        group = QPalette.Active if self.isEnabled() else QPalette.Disabled
+        arrow.palette.setColor(QPalette.ButtonText, option.palette.color(group, QPalette.Text))
+        QApplication.style().drawPrimitive(QStyle.PE_IndicatorArrowDown, arrow, painter, self)
 
         rect = self.style().subControlRect(
             QStyle.CC_ComboBox,
@@ -1742,6 +1752,12 @@ class CenteredComboBox(QComboBox):
             QStyle.SC_ComboBoxEditField,
             self,
         )
+
+        # Reserve equal space on both sides so the native arrow does not
+        # shift the label away from the center of the whole button.
+        inset = max(rect.left(), self.width() - rect.right() - 1)
+        rect.setLeft(inset)
+        rect.setRight(self.width() - inset - 1)
 
         text = self.currentText()
         if self.currentIndex() < 0:
@@ -2144,16 +2160,11 @@ class YamahaRemote(QWidget):
                 }
 
                 QComboBox::drop-down {
-                    width: 0px;
                     border: none;
                     background: transparent;
+                    width: 20px;
                 }
 
-                QComboBox::down-arrow {
-                    image: none;
-                    width: 0px;
-                    height: 0px;
-                }
 
                 QComboBox QAbstractItemView {
                     background-color: rgba(40, 40, 40, 240);
