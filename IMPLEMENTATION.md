@@ -139,3 +139,9 @@ Both repositories keep identical `tests/fixtures/amplifier_protocol_v1.json` wir
 ## Local configuration files
 
 `YamahaRemote.example.json` is the tracked connection-settings template, with an empty host. `YamahaRemote.json` is local and ignored by Git; the script generates defaults and prompts for missing settings when it is absent. Crash logs and temporary JSON files are also ignored. Existing local configuration bytes are preserved when removing the file from Git tracking; no Git history is rewritten.
+
+## Window and volume controls
+
+The fixed client width is 303 Qt logical pixels. On the supplied Windows setup, the previous 330 px client measured 332 px including its border, so the new width matches the supplied Sony measurement of 305 px overall. Window decorations vary by platform, and Qt handles display scaling. The volume row uses three equal-stretch columns with 6 px spacing, Sony-equivalent insets, compact −/+ labels, and a centered 13 pt semibold display. Raw/dB conversion and draggable-label behavior remain unchanged.
+
+Qt button auto-repeat uses a 500 ms initial delay and 100 ms interval. The `pressed` signal performs the immediate and repeated adjustments; releasing does not add a step. Adjustments use the existing serialized action path and its busy, connection, and calibration guards. No new worker queue, device polling timer, or global-key ownership behavior is introduced.

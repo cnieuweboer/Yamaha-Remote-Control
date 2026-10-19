@@ -33,6 +33,8 @@ python3 -m pip install PySide6
 python3 YamahaRemote.pyw
 ```
 
+The volume `−` and `+` buttons repeat while held, starting after half a second.
+
 ## Configuration
 
 ```json

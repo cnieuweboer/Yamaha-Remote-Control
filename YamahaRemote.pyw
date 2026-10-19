@@ -20,7 +20,7 @@ from urllib.parse import quote
 from urllib.request import build_opener, ProxyHandler
 from PySide6.QtCore import QEasingCurve, QElapsedTimer, QRect, QEvent, QFileInfo, QFileSystemWatcher, QObject, QLockFile, QProcess, QRunnable, QStandardPaths, QThreadPool, QTimer, Qt, Signal
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
-from PySide6.QtGui import QAction, QColor, QIcon, QPalette
+from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -436,7 +436,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.19.15"
+__version__ = "2026.10.19.16"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -447,6 +447,7 @@ NETWORK_TIMEOUT_SECONDS = 2.0
 
 POLL_INTERVAL_MS = 2000
 POPUP_ANIMATION_DURATION_MS = 200
+WINDOW_WIDTH = 303  # 305 including the 2 px border on the reference Windows setup.
 
 
 CONFIG_RESTART_DEBOUNCE_MS = 200
@@ -1925,7 +1926,7 @@ class YamahaRemote(QWidget):
     def _build_ui(self):
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(QApplication.windowIcon())
-        self.setFixedWidth(330)
+        self.setFixedWidth(WINDOW_WIDTH)
 
         if self.mica_enabled:
             self.setAttribute(Qt.WA_TranslucentBackground)
@@ -1942,34 +1943,46 @@ class YamahaRemote(QWidget):
         self._fit_and_lock_window()
 
     def _build_volume_controls(self):
-        self.volume_value = self._new_status_label("")
+        self.volume_value = DraggableLabel("—", self)
+        self.volume_value.setObjectName("volumeValue")
+        self.volume_value.setAlignment(Qt.AlignCenter)
+        volume_font = self.volume_value.font()
+        volume_font.setPointSizeF(13)
+        volume_font.setWeight(QFont.DemiBold)
+        self.volume_value.setFont(volume_font)
 
         self.mute_button = self._new_button("Mute")
         self.power_button = self._new_button("Standby")
-        self.volume_down = self._new_button("Volume -")
-        self.volume_up = self._new_button("Volume +")
+        self.volume_down = self._new_button("−")
+        self.volume_up = self._new_button("+")
         self.mute_button.setToolTip("Shortcut: Volume Mute")
         self.volume_down.setToolTip("Shortcut: Volume Down")
         self.volume_up.setToolTip("Shortcut: Volume Up")
 
         self.mute_button.clicked.connect(self.toggle_mute)
         self.power_button.clicked.connect(self.toggle_power)
-        self.volume_down.clicked.connect(
-            lambda: self.adjust_volume(-1)
-        )
-        self.volume_up.clicked.connect(
-            lambda: self.adjust_volume(1)
-        )
+        for button, direction in ((self.volume_down, -1), (self.volume_up, 1)):
+            button_font = button.font()
+            button_font.setPointSizeF(9)
+            button.setFont(button_font)
+            button.setAutoRepeat(True)
+            button.setAutoRepeatDelay(500)
+            button.setAutoRepeatInterval(100)
+            # Match the TV remote: immediate press, repeats, no release step.
+            button.pressed.connect(lambda direction=direction: self.adjust_volume(direction))
 
         self.main_layout.addWidget(self.mute_button, 0, 0)
         self.main_layout.addWidget(self.power_button, 0, 1)
 
-        volume_row = QHBoxLayout()
-        volume_row.setSpacing(8)
-        volume_row.setContentsMargins(0, 0, 0, 0)
-        volume_row.addWidget(self.volume_down, 1)
-        volume_row.addWidget(self.volume_value, 0)
-        volume_row.addWidget(self.volume_up, 1)
+        volume_row = QGridLayout()
+        volume_row.setSpacing(6)
+        # Match the TV remote's outer/section insets within our 10 px margins.
+        volume_row.setContentsMargins(12, 0, 12, 0)
+        for column in range(3):
+            volume_row.setColumnStretch(column, 1)
+        volume_row.addWidget(self.volume_down, 0, 0)
+        volume_row.addWidget(self.volume_value, 0, 1)
+        volume_row.addWidget(self.volume_up, 0, 2)
 
         self.main_layout.addLayout(
             volume_row,
@@ -2038,13 +2051,6 @@ class YamahaRemote(QWidget):
         # Size the window for the configured number of favorite rows,
         # then prevent manual resizing while the app is running.
         self.setFixedHeight(self.sizeHint().height())
-
-    def _new_status_label(self, text):
-        label = DraggableLabel(text, self)
-        label.setAlignment(Qt.AlignCenter)
-        label.setMinimumHeight(22)
-        label.setFixedWidth(52)
-        return label
 
     def _new_button(self, text):
         button = QPushButton(text)
@@ -2453,7 +2459,7 @@ class YamahaRemote(QWidget):
         self._last_status_at = None
         self._publish_hotkey_state()
 
-        self.volume_value.setText("-")
+        self.volume_value.setText("—")
         self.power_button.setText("Offline")
 
         self.set_controls_enabled(False)
@@ -2464,7 +2470,7 @@ class YamahaRemote(QWidget):
         self.last_status = None
         self._last_status_at = None
         self._publish_hotkey_state()
-        self.volume_value.setText("-")
+        self.volume_value.setText("—")
         self.power_button.setText("Error")
         self.set_controls_enabled(False)
 
@@ -2481,7 +2487,7 @@ class YamahaRemote(QWidget):
                 status.get("volume")
             )
             if power == "on"
-            else "-"
+            else "—"
         )
 
         muted = bool(status.get("mute"))
