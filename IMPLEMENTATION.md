@@ -125,3 +125,11 @@ The switch is checked after single-instance activation, so a second launch resto
 The final popup rectangle comes directly from Qt, including screen-constrained placement for long lists. Upward/downward growth stays inside that rectangle. Finishing or interrupting the animation restores the native geometry and layout, removes the event filter, and stops the timer. Navigation and scrolling remain live throughout opening; selecting or dismissing the popup performs normal cleanup. The centered text/delegate, native frame/shadow, selection signals, and active-popup identity used by shortcut blocking are retained. The implementation is adapted from the supplied live-view comparison prototype and remains self-contained.
 
 `tests/test_dropdown_animation.py` exercises selection, early keyboard input, Escape and native dismissal, repeated opening, owner close/reopen, long-list navigation and both placement directions, disabled animations/workaround, empty lists, and preference restoration on failure. Offscreen tests verify Qt behavior and geometry; the Windows-specific bleed-through fix and native shadow/animation appearance require desktop verification.
+
+## Amplifier protocol contract checks
+
+Protocol version 1 acknowledgements have integer `id`, boolean `accepted`, and an optional `reason` (`""`, `queue_full`, or `state_changed`). Missing reasons are treated as empty; rejection without an explanation receives generic feedback. Queue-full drops stay silent and commands are never replayed on uncertain delivery. Sony records invalid messages in optional diagnostics with duplicate suppression and displays brand-neutral incompatibility feedback.
+
+Amplifier feedback is stored separately from discovery feedback, survives TV polling, and clears only when a pending amplifier command receives an accepted acknowledgement. Acceptance means queued by the amplifier remote, not confirmation that the physical device completed the command.
+
+Both repositories keep identical `tests/fixtures/amplifier_protocol_v1.json` wire examples. Tests compare Yamaha's actual snapshots and acknowledgement production with those examples and feed the same messages through Sony's actual consumer. Fixtures and tests are development-only; the scripts remain self-contained. Changes to the wire contract should update and verify both copies together.

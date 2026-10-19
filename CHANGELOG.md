@@ -4,6 +4,8 @@ Release identifiers below come from the corresponding commits. Some releases upd
 
 ## 2026-10-19
 
+- Protocol contract coverage — Add the same version-1 wire fixtures as Sony Remote and verify actual amplifier snapshots and command acknowledgements against them. Document optional acknowledgement reasons and feedback behavior. Yamaha runtime remains 2026.10.19.11.
+
 - 2026.10.19.11 — Add the same live-view input-dropdown animation as Sony Remote, with the `DropdownAnimationWorkaround` setting (default enabled on Windows). Keep scrolling and keyboard navigation live, preserve native placement and disabled system animations, and add popup lifecycle regression coverage.
 
 - 2026.10.19.9 — Add `--start-in-tray`, gated by both tray settings and actual tray availability. Start hidden without a visible-window flash, keep ordinary fallback/second-launch activation and restart arguments, and add startup regression tests.
