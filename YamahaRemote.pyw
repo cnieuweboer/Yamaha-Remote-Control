@@ -436,7 +436,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.19.11"
+__version__ = "2026.10.19.13"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -705,8 +705,6 @@ def validate_config(raw_config, *, allow_incomplete=False):
 
 
 def load_config():
-    script_path = Path(__file__).resolve()
-
     config_path = CONFIG_PATH
 
     if not config_path.exists():

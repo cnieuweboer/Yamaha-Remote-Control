@@ -6,12 +6,9 @@ Small PySide6 desktop remote for Yamaha receivers/amplifiers using the Yamaha Ex
 
 ## Installation
 
-Place these files in the same folder.
+Run `YamahaRemote.pyw` from a writable folder. On first launch it creates `YamahaRemote.json` and prompts you to fill in the missing connection settings; you can also copy `YamahaRemote.example.json` to `YamahaRemote.json` before starting.
 
-```text
-YamahaRemote.pyw
-YamahaRemote.json
-```
+Local settings, diagnostic logs, and temporary JSON files are ignored by Git. When updating an older Git checkout, back up `YamahaRemote.json` before pulling this change and restore it afterward if Git removes it. Do not put credentials in the example file.
 
 ## Windows
 
