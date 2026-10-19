@@ -18,7 +18,7 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import build_opener, ProxyHandler
-from PySide6.QtCore import QEvent, QFileInfo, QFileSystemWatcher, QObject, QLockFile, QProcess, QRunnable, QStandardPaths, QThreadPool, QTimer, Qt, Signal
+from PySide6.QtCore import QEasingCurve, QElapsedTimer, QRect, QEvent, QFileInfo, QFileSystemWatcher, QObject, QLockFile, QProcess, QRunnable, QStandardPaths, QThreadPool, QTimer, Qt, Signal
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtGui import QAction, QColor, QIcon, QPalette
 from PySide6.QtWidgets import (
@@ -33,6 +33,9 @@ from PySide6.QtWidgets import (
     QPushButton,
     QProxyStyle,
     QStyle,
+    QStylePainter,
+    QStyleOptionComboBox,
+    QStyledItemDelegate,
     QSystemTrayIcon,
     QWidget,
 )
@@ -433,7 +436,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.19.9"
+__version__ = "2026.10.19.11"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -443,6 +446,7 @@ NETWORK_TIMEOUT_SECONDS = 2.0
 
 
 POLL_INTERVAL_MS = 2000
+POPUP_ANIMATION_DURATION_MS = 200
 
 
 CONFIG_RESTART_DEBOUNCE_MS = 200
@@ -467,6 +471,7 @@ DEFAULT_CONFIG = {
     "GlobalVolumeHotkeys": False,
     "DiagnosticsEnabled": False,
     "SortByName": False,
+    "DropdownAnimationWorkaround": sys.platform == "win32",
     "Inputs": {},
     "SystemTray": False,
     "CloseToTray": False,
@@ -475,7 +480,7 @@ DEFAULT_CONFIG = {
 
 BOOLEAN_CONFIG_KEYS = (
     "GlobalVolumeHotkeys", "DiagnosticsEnabled", "SortByName", "DarkMode", "Mica",
-    "SystemTray", "CloseToTray", "VolumeDb",
+    "SystemTray", "CloseToTray", "VolumeDb", "DropdownAnimationWorkaround",
 )
 
 
@@ -1609,6 +1614,151 @@ class DraggableLabel(QLabel):
         super().mousePressEvent(event)
 
 
+class CenteredComboBox(QComboBox):
+    def __init__(self, parent=None, *, animate_popup=False):
+        super().__init__(parent)
+        self._animate_popup = animate_popup
+        self._popup = None
+        self._popup_view = None
+        self._final_rect = None
+        self._view_rect = None
+        self._popup_layout = None
+        self._layout_was_enabled = False
+        self._opens_downward = True
+        self._elapsed = QElapsedTimer()
+        self._easing = QEasingCurve(QEasingCurve.OutCubic)
+        self._popup_timer = QTimer(self)
+        self._popup_timer.setTimerType(Qt.PreciseTimer)
+        self._popup_timer.setInterval(8)
+        self._popup_timer.timeout.connect(self._animation_tick)
+
+    def showPopup(self):
+        if not self._animate_popup:
+            super().showPopup()
+            return
+        if self.view().window().isVisible():
+            self.hidePopup()
+            return
+
+        app = QApplication.instance()
+        effect = Qt.UI_AnimateCombo
+        animate = app.isEffectEnabled(effect)
+        # Suppress Qt's rolling window, then animate only the real popup.
+        # Restore the preference immediately, including when opening fails.
+        app.setEffectEnabled(effect, False)
+        try:
+            super().showPopup()
+        finally:
+            app.setEffectEnabled(effect, animate)
+        if not animate:
+            return  # Respect the user's/system's disabled UI animations.
+
+        view = self.view()
+        popup = view.window()
+        final_rect = popup.geometry()
+        if not popup.isVisible() or final_rect.height() <= 2:
+            return
+
+        # Keep Qt's final placement, including screen-edge clipping and
+        # popups that overlap the combo. Never relocate it above/below by hand.
+        self._opens_downward = final_rect.center().y() >= self.mapToGlobal(self.rect().center()).y()
+        self._popup, self._popup_view = popup, view
+        self._final_rect = QRect(final_rect)
+        self._view_rect = QRect(view.geometry())
+        self._popup_layout = popup.layout()
+        if self._popup_layout is not None:
+            self._layout_was_enabled = self._popup_layout.isEnabled()
+            # Deferred layout passes must not shrink the live view between
+            # animation frames and change its scrollbar geometry.
+            self._popup_layout.setEnabled(False)
+        popup.installEventFilter(self)
+        self._elapsed.start()
+        self._animation_tick()
+        popup.raise_()
+        self._popup_timer.start()
+
+    def _animation_tick(self):
+        if self._popup is None:
+            return
+        linear = min(1.0, self._elapsed.elapsed() / POPUP_ANIMATION_DURATION_MS)
+        progress = self._easing.valueForProgress(linear)
+        # Scroll controls can impose a taller minimum on long popups.
+        minimum = min(self._final_rect.height(), max(2, self._popup.minimumHeight()))
+        height = round(minimum + (self._final_rect.height() - minimum) * progress)
+        rect = QRect(self._final_rect)
+        rect.setHeight(height)
+        if not self._opens_downward:
+            rect.moveBottom(self._final_rect.bottom())
+        self._popup.setGeometry(rect)
+        view_rect = QRect(self._view_rect)
+        if self._opens_downward:
+            view_rect.translate(0, height - self._final_rect.height())
+        self._popup_view.setGeometry(view_rect)
+        if linear >= 1:
+            self._finish_popup_animation(focus_view=True)
+
+    def _finish_popup_animation(self, *, focus_view=False):
+        self._popup_timer.stop()
+        popup, view = self._popup, self._popup_view
+        if popup is None:
+            return
+        # Clear the active marker before restoring widgets: restoration itself
+        # can generate Qt show/hide/focus events.
+        self._popup = None
+        popup.removeEventFilter(self)
+        popup.setGeometry(self._final_rect)
+        view.setGeometry(self._view_rect)
+        view.show()
+        view.raise_()
+        view.update()
+        view.viewport().update()
+        if self._popup_layout is not None:
+            self._popup_layout.setEnabled(self._layout_was_enabled)
+        self._popup_layout = None
+        if focus_view and popup.isVisible():
+            view.setFocus(Qt.PopupFocusReason)
+        self._popup_view = None
+        self._final_rect = self._view_rect = None
+
+    def eventFilter(self, watched, event):
+        if self._popup is not None:
+            if watched is self._popup and event.type() in (QEvent.Hide, QEvent.Close):
+                self._finish_popup_animation()
+        return super().eventFilter(watched, event)
+
+    def hidePopup(self):
+        self._finish_popup_animation()
+        super().hidePopup()
+
+    def paintEvent(self, event):
+        painter = QStylePainter(self)
+        option = QStyleOptionComboBox()
+        self.initStyleOption(option)
+
+        painter.drawComplexControl(QStyle.CC_ComboBox, option)
+
+        rect = self.style().subControlRect(
+            QStyle.CC_ComboBox,
+            option,
+            QStyle.SC_ComboBoxEditField,
+            self,
+        )
+
+        text = self.currentText()
+        if self.currentIndex() < 0:
+            text = self.placeholderText()
+
+        group = QPalette.Active if self.isEnabled() else QPalette.Disabled
+        painter.setPen(option.palette.color(group, QPalette.Text))
+        painter.drawText(rect, Qt.AlignCenter, text)
+
+
+class CenteredComboDelegate(QStyledItemDelegate):
+    def initStyleOption(self, option, index):
+        super().initStyleOption(option, index)
+        option.displayAlignment = Qt.AlignCenter
+
+
 # ----------------------------
 # Main window
 # ----------------------------
@@ -1861,7 +2011,8 @@ class YamahaRemote(QWidget):
             button.deleteLater()
 
     def _build_input_controls(self):
-        self.input_combo = QComboBox()
+        self.input_combo = CenteredComboBox(animate_popup=self.config["DropdownAnimationWorkaround"])
+        self.input_combo.setItemDelegate(CenteredComboDelegate(self.input_combo))
         self.input_combo.setMinimumHeight(30)
         self.input_combo.activated.connect(
             self.select_input

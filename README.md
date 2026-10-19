@@ -64,6 +64,7 @@ python3 YamahaRemote.pyw
 - `GlobalVolumeHotkeys` — `false` by default. On Windows, set to `true` to control the amplifier with Volume Up, Volume Down, and Mute even when another app is focused. With `false`, these keys control the amplifier only while Yamaha Remote is focused.
 - `DiagnosticsEnabled` — `false` by default. Set to `true` to append unexpected errors and crash diagnostics to `YamahaRemote-crash.log` beside the script. Logs contain the app version, exception types, and stack locations; exception messages, source lines, request data, and local variable values are omitted. If the log cannot be opened or written, the app continues without logging.
 - `SortByName` — `false` (default) keeps favorites and dropdown entries in JSON insertion order; `true` sorts them alphabetically by `NameOverride`, falling back to `Name`, ignoring case.
+- `DropdownAnimationWorkaround` — use a live 200 ms input-dropdown animation to avoid flickering button text on Windows (enabled by default on Windows). Set to `false` for the standard Qt dropdown; disabled system animations remain disabled.
 - `Inputs` — settings for the inputs discovered from the Yamaha device.
   - `Name` — name reported by the Yamaha device. This is updated automatically.
   - `NameOverride` — optional replacement name shown in the dropdown and on favorite buttons.

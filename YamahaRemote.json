@@ -8,6 +8,7 @@
   "GlobalVolumeHotkeys": false,
   "DiagnosticsEnabled": false,
   "SortByName": false,
+  "DropdownAnimationWorkaround": true,
   "Inputs": {},
   "SystemTray": false,
   "CloseToTray": false
