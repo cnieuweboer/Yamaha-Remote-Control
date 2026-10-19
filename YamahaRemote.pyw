@@ -436,7 +436,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.19.13"
+__version__ = "2026.10.19.15"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
