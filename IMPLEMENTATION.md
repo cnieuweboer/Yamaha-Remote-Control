@@ -190,3 +190,5 @@ With Windows Mica active, the power/standby button also uses an opaque dark/ligh
 
 
 With Windows Mica active, all buttons, comboboxes, and text input now share the former dark/light control colors and borders, using opaque fills to prevent backdrop effects within controls. Hover, pressed, disabled, and dropdown selection states are explicitly styled; dropdown surfaces use the previous 40/250 grayscale colors. This replaces the narrower power-button override. Non-Mica configurations keep Qt-managed control palettes.
+
+Speaker discovery reads the first current output state in the same serialized worker immediately after capabilities, recording its actual observation time. The selector no longer waits for a subsequent periodic poll to select its initial value; a failed optional state read preserves capabilities for recovery through ordinary status polling. SET verification/grace timing is unchanged.

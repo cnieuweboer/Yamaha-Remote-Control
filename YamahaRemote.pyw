@@ -438,7 +438,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.20.8"
+__version__ = "2026.10.20.9"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -2374,7 +2374,18 @@ class YamahaRemote(QWidget):
         if self._shutting_down or self._speaker_outputs is not None or self._speaker_discovery_running:
             return
         self._speaker_discovery_running = True
-        def done(outputs):
+        def query():
+            outputs = self.api.get_speaker_outputs()
+            state = observed_at = error = None
+            if outputs:
+                try:
+                    state = self.api.get_speaker_state(outputs)
+                    observed_at = time.monotonic()
+                except Exception as exc:
+                    error = exc
+            return outputs, state, observed_at, error
+        def done(result):
+            outputs, initial_state, observed_at, error = result
             self._speaker_outputs = outputs
             self.speaker_combo.clear()
             for label, state in (("Off", (False, False)), ("A", (True, False)),
@@ -2385,10 +2396,15 @@ class YamahaRemote(QWidget):
                 self.speaker_combo.clear()
                 self.speaker_combo.setPlaceholderText("Unavailable")
                 self.speaker_combo.setToolTip("No controllable speaker outputs are advertised by this amplifier.")
-            self._update_speaker_ui()
+            if error is not None:
+                self._speaker_read_failed(error)
+            elif initial_state is not None:
+                self._accept_speaker_state(initial_state, observed_at)
+            else:
+                self._update_speaker_ui()
             self.update_control_states()
         self.run_worker(
-            self.api.get_speaker_outputs, on_result=done,
+            query, on_result=done,
             on_error=self._speaker_read_failed,
             on_finished=lambda: setattr(self, "_speaker_discovery_running", False),
         )

@@ -129,17 +129,43 @@ class SpeakerUiTests(unittest.TestCase):
 
     def discover(self, outputs=('a', 'b')):
         def worker(function, **callbacks):
-            callbacks['on_result'](outputs)
+            callbacks['on_result'](function())
             callbacks['on_finished']()
-        with patch.object(self.window, 'run_worker', side_effect=worker):
+        with patch.object(self.window, 'run_worker', side_effect=worker), \
+                patch.object(self.window.api, 'get_speaker_outputs', return_value=outputs), \
+                patch.object(self.window.api, 'get_speaker_state', return_value=(True, False)):
             self.window.load_speaker_outputs()
-        if outputs:
-            self.window._accept_speaker_state((True, False))
         self.window.update_control_states()
 
     def index(self, state):
         return next(i for i in range(self.window.speaker_combo.count())
                     if self.window.speaker_combo.itemData(i) == state)
+
+    def test_discovery_displays_first_get_without_waiting_for_poll_or_grace(self):
+        with patch.object(self.window, 'poll_status') as poll:
+            self.discover()
+        self.assertEqual(self.window.speaker_combo.currentData(), (True, False))
+        self.assertIsNotNone(self.window._speaker_state_at)
+        self.assertIsNone(self.window._speaker_target)
+        self.assertIsNone(self.window._speaker_grace_deadline)
+        poll.assert_not_called()
+
+    def test_discovery_keeps_capabilities_when_initial_state_read_fails(self):
+        error = ui_fixture.REMOTE['DeviceResponseError']("Optional speaker status unavailable")
+        def worker(function, **callbacks):
+            callbacks['on_result'](function())
+            callbacks['on_finished']()
+        with patch.object(self.window, 'run_worker', side_effect=worker), \
+                patch.object(self.window.api, 'get_speaker_outputs', return_value=('a', 'b')), \
+                patch.object(self.window.api, 'get_speaker_state', side_effect=error):
+            self.window.load_speaker_outputs()
+        self.assertEqual(self.window._speaker_outputs, ('a', 'b'))
+        self.assertEqual(self.window.speaker_combo.count(), 4)
+        self.assertIsNone(self.window._speaker_state)
+        self.assertFalse(self.window.speaker_combo.isEnabled())
+        self.window._accept_speaker_state((True, False))
+        self.window.update_control_states()
+        self.assertTrue(self.window.speaker_combo.isEnabled())
 
     def test_supported_combinations_and_unknown_unsupported_states(self):
         for outputs, states in ((('a', 'b'), [(False, False), (True, False), (False, True), (True, True)]),
