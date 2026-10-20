@@ -13,7 +13,7 @@ Local settings, diagnostic logs, and temporary JSON files are ignored by Git. Wh
 ## Windows
 
 ```powershell
-py -m pip install PySide6
+py -m pip install "PySide6>=6.8"
 ```
 
 Run `YamahaRemote.pyw`.
@@ -29,7 +29,7 @@ This starts hidden only when `SystemTray` and `CloseToTray` are both `true` and 
 ## macOS
 
 ```bash
-python3 -m pip install PySide6
+python3 -m pip install "PySide6>=6.8"
 python3 YamahaRemote.pyw
 ```
 
@@ -59,7 +59,7 @@ Speaker selection updates immediately while the amplifier applies and confirms t
 ```
 
 - `Host` — IP address or hostname of the Yamaha device.
-- `DarkMode` — `true` or `false`.
+- `DarkMode` — Requests Qt’s native dark (`true`) or light (`false`) appearance independently of the desktop theme. Requires PySide6 6.8 or newer.
 - `Mica` — Windows-only Mica background. Ignored on macOS.
 - `VolumeDb` — display volume in dB instead of the API volume value.
 - `VolumeDbAtZero` — dB value corresponding to volume `0`. Required when `VolumeDb` is `true`.

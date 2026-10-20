@@ -4,6 +4,8 @@ Release identifiers below come from the corresponding commits. Some releases upd
 
 ## 2026-10-20
 
+- 2026.10.20.5 — Request light/dark appearance through Qt 6.8+ platform integration. Remove fixed control colors and the manual dark title-bar override; retain layout, typography, Mica support, and live dropdown animation. Windows appearance and live desktop-theme changes require visual verification.
+
 - 2026.10.20.4 — Preserve Qt window geometry and visible/minimized/tray state across configuration restarts. Startup-in-tray arguments apply only to the initial launch; disabling tray support makes a hidden replacement visible.
 
 - 2026.10.20.3 — Publish independently fresh, confirmed speaker state to calibration clients and support exclusive, verified speaker changes. Enable helper isolation and volume-first restoration without changing ordinary amplifier IPC or optimistic speaker UI. Add command and snapshot regression tests.
