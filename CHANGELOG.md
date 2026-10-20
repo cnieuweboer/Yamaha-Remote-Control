@@ -2,6 +2,10 @@
 
 Release identifiers below come from the corresponding commits. Some releases updated only the calibration helper; the remote and helper can therefore have different version numbers. Historical behavior may have been superseded by later releases.
 
+## 2026-10-20
+
+- 2026.10.20.1 — Add advertised A/B speaker-output selection using system/getFuncStatus and system/setSpeakerA/B. Optimistically display requested combinations and allow delayed GET updates, verifying unwanted outputs off before enabling others. Move controls into Sony-style Input and Volume sections, place favorites below the input selector, and fit Mute beside Speakers. Preserve standalone operation and existing input/volume/IPC behavior; add fake-device safety, timing, and layout coverage. Calibration integration is a separate follow-up.
+
 ## 2026-10-19
 
 - 2026.10.19.19 — Restore the native Qt dropdown arrow in a borderless, transparent right-hand area. Keep labels centered across the full combobox and retain the live-view popup animation; no icon files are required.

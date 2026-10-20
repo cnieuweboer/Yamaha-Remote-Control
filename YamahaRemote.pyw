@@ -26,6 +26,8 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFileIconProvider,
     QGridLayout,
+    QFrame,
+    QVBoxLayout,
     QHBoxLayout,
     QMenu,
     QLabel,
@@ -436,7 +438,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.19.19"
+__version__ = "2026.10.20.1"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -447,6 +449,7 @@ NETWORK_TIMEOUT_SECONDS = 2.0
 
 POLL_INTERVAL_MS = 2000
 POPUP_ANIMATION_DURATION_MS = 200
+SPEAKER_STATUS_GRACE_SECONDS = 3.0
 WINDOW_WIDTH = 303  # 305 including the 2 px border on the reference Windows setup.
 
 
@@ -1491,6 +1494,51 @@ class YamahaApi:
             + quote(input_id, safe="")
         )
 
+    def get_speaker_outputs(self):
+        features = self._get_json("system/getFeatures")
+        system = features.get("system", {})
+        functions = system.get("func_list", []) if isinstance(system, dict) else None
+        if not isinstance(functions, list):
+            raise DeviceResponseError("Yamaha returned invalid speaker capabilities.")
+        return tuple(name for name in ("a", "b") if f"speaker_{name}" in functions)
+
+    def get_speaker_state(self, outputs):
+        status = self._get_json("system/getFuncStatus")
+        state = []
+        for name in ("a", "b"):
+            if name not in outputs:
+                state.append(False)
+            elif type(status.get(f"speaker_{name}")) is bool:
+                state.append(status[f"speaker_{name}"])
+            else:
+                raise DeviceResponseError(f"Yamaha did not report a valid Speaker {name.upper()} state.")
+        return tuple(state)
+
+    def set_speakers(self, target, outputs):
+        if (not outputs or not isinstance(target, (tuple, list)) or len(target) != 2
+                or any(type(value) is not bool for value in target)
+                or any(enabled and name not in outputs for name, enabled in zip(("a", "b"), target))):
+            raise DeviceResponseError("The selected speaker combination is unavailable.")
+        target = tuple(target)
+        current = self.get_speaker_state(outputs)
+        # Turn unwanted outputs off and confirm that before enabling others.
+        for enabled in (False, True):
+            for index, name in enumerate(("a", "b")):
+                if name not in outputs or target[index] != enabled or current[index] == enabled:
+                    continue
+                self._get_json(f"system/setSpeaker{name.upper()}?enable={str(enabled).lower()}")
+                expected = list(current)
+                expected[index] = enabled
+                deadline = time.monotonic() + SPEAKER_STATUS_GRACE_SECONDS
+                while True:
+                    current = self.get_speaker_state(outputs)
+                    if current == tuple(expected):
+                        break
+                    if time.monotonic() >= deadline:
+                        raise DeviceResponseError("The amplifier did not confirm the selected speakers in time.")
+                    time.sleep(0.10)
+        return current
+
     def get_inputs(self):
         features = self._get_json(
             "system/getFeatures"
@@ -1820,6 +1868,11 @@ class YamahaRemote(QWidget):
         self._volume_batch_count = 0
         self.last_status = None
         self.inputs = []
+        self._speaker_outputs = None
+        self._speaker_discovery_running = False
+        self._speaker_state = None
+        self._speaker_target = None
+        self._speaker_grace_deadline = None
         self.input_settings = config["Inputs"]
         self.favorite_buttons = {}
         self.control_widgets = []
@@ -1835,6 +1888,7 @@ class YamahaRemote(QWidget):
 
         self._build_ui()
         self._apply_style()
+        self._fit_and_lock_window()
         self._setup_timers()
         self._setup_config_watcher()
         self._setup_tray()
@@ -1941,24 +1995,39 @@ class YamahaRemote(QWidget):
 
     def _build_ui(self):
         self.setWindowTitle(APP_NAME)
+        self.setObjectName("remoteRoot")
         self.setWindowIcon(QApplication.windowIcon())
         self.setFixedWidth(WINDOW_WIDTH)
-
         if self.mica_enabled:
             self.setAttribute(Qt.WA_TranslucentBackground)
-
-        self.main_layout = QGridLayout(self)
-        self.main_layout.setHorizontalSpacing(8)
-        self.main_layout.setVerticalSpacing(8)
-        self.main_layout.setContentsMargins(10, 10, 10, 10)
-
-        self._favorite_start_row = 2
-        self._build_volume_controls()
-        self._build_favorites_from_config()
+        self.main_layout = QVBoxLayout(self)
+        self.main_layout.setContentsMargins(12, 12, 12, 12)
+        self.main_layout.setSpacing(9)
+        self.power_button = self._new_button("Standby")
+        self.power_button.setMinimumHeight(38)
+        self.power_button.clicked.connect(self.toggle_power)
+        self.main_layout.addWidget(self.power_button)
+        self.control_widgets.append(self.power_button)
         self._build_input_controls()
+        self._build_favorites_from_config()
+        self._build_volume_controls()
         self._fit_and_lock_window()
 
+    def _section(self, title):
+        frame = QFrame()
+        frame.setObjectName("section")
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(9, 8, 9, 9)
+        layout.setSpacing(6)
+        label = QLabel(title)
+        label.setObjectName("sectionTitle")
+        label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(label)
+        self.main_layout.addWidget(frame)
+        return layout
+
     def _build_volume_controls(self):
+        layout = self._section("Volume")
         self.volume_value = DraggableLabel("—", self)
         self.volume_value.setObjectName("volumeValue")
         self.volume_value.setAlignment(Qt.AlignCenter)
@@ -1966,105 +2035,87 @@ class YamahaRemote(QWidget):
         volume_font.setPointSizeF(13)
         volume_font.setWeight(QFont.DemiBold)
         self.volume_value.setFont(volume_font)
-
-        self.mute_button = self._new_button("Mute")
-        self.power_button = self._new_button("Standby")
         self.volume_down = self._new_button("−")
         self.volume_up = self._new_button("+")
-        self.mute_button.setToolTip("Shortcut: Volume Mute")
-        self.volume_down.setToolTip("Shortcut: Volume Down")
-        self.volume_up.setToolTip("Shortcut: Volume Up")
-
-        self.mute_button.clicked.connect(self.toggle_mute)
-        self.power_button.clicked.connect(self.toggle_power)
         for button, direction in ((self.volume_down, -1), (self.volume_up, 1)):
-            button_font = button.font()
-            button_font.setPointSizeF(9)
-            button.setFont(button_font)
+            font = button.font()
+            font.setPointSizeF(9)
+            button.setFont(font)
+            button.setToolTip("Shortcut: Volume " + ("Down" if direction < 0 else "Up"))
             button.setAutoRepeat(True)
             button.setAutoRepeatDelay(500)
             button.setAutoRepeatInterval(100)
-            # Match the TV remote: immediate press, repeats, no release step.
             button.pressed.connect(lambda direction=direction: self.adjust_volume(direction))
-
-        self.main_layout.addWidget(self.mute_button, 0, 0)
-        self.main_layout.addWidget(self.power_button, 0, 1)
-
         volume_row = QGridLayout()
         volume_row.setSpacing(6)
-        volume_row.setContentsMargins(0, 0, 0, 0)
         for column in range(3):
             volume_row.setColumnStretch(column, 1)
-        volume_row.addWidget(self.volume_down, 0, 0)
-        volume_row.addWidget(self.volume_value, 0, 1)
-        volume_row.addWidget(self.volume_up, 0, 2)
-
-        self.main_layout.addLayout(
-            volume_row,
-            1,
-            0,
-            1,
-            2,
-        )
+        for column, widget in enumerate((self.volume_down, self.volume_value, self.volume_up)):
+            volume_row.addWidget(widget, 0, column)
+        layout.addLayout(volume_row)
+        self.mute_button = self._new_button("Mute")
+        self.mute_button.setToolTip("Shortcut: Volume Mute")
+        self.mute_button.clicked.connect(self.toggle_mute)
+        self.speaker_combo = self._new_combo()
+        self.speaker_combo.setPlaceholderText("Speakers: unknown")
+        self.speaker_combo.setToolTip("Speaker outputs")
+        self.speaker_combo.activated.connect(self.select_speakers)
+        row = QGridLayout()
+        row.setSpacing(6)
+        row.setColumnStretch(0, 1)
+        row.setColumnStretch(1, 2)
+        row.addWidget(self.mute_button, 0, 0)
+        row.addWidget(self.speaker_combo, 0, 1)
+        layout.addLayout(row)
+        self.control_widgets.extend((self.volume_down, self.volume_up, self.mute_button, self.speaker_combo))
 
     def _build_favorites_from_config(self):
         buttons = dict(self.favorite_buttons)
         for button in buttons.values():
-            self.main_layout.removeWidget(button)
+            self.input_favorites_layout.removeWidget(button)
         self.favorite_buttons.clear()
-        favorites = [
-            (input_id, settings)
-            for input_id, settings in _ordered_entries(
-                self.input_settings, self.config["SortByName"]
-            )
-            if settings["Favorite"]
-        ]
+        favorites = [(input_id, settings) for input_id, settings in
+                     _ordered_entries(self.input_settings, self.config["SortByName"]) if settings["Favorite"]]
         for index, (input_id, settings) in enumerate(favorites):
             button = buttons.pop(input_id, None)
             if button is None:
                 button = self._new_button("")
-                button.clicked.connect(
-                    lambda checked=False, input_id=input_id: self.set_input(input_id)
-                )
+                button.clicked.connect(lambda checked=False, input_id=input_id: self.set_input(input_id))
                 self.control_widgets.append(button)
             button.setText(_entry_display_name(settings))
             self.favorite_buttons[input_id] = button
             row, column = divmod(index, 2)
-            self.main_layout.addWidget(button, self._favorite_start_row + row, column)
+            self.input_favorites_layout.addWidget(button, row, column)
+            button.show()
         for button in buttons.values():
             self.control_widgets.remove(button)
             button.hide()
             button.deleteLater()
 
+    def _new_combo(self):
+        combo = CenteredComboBox(animate_popup=self.config["DropdownAnimationWorkaround"])
+        combo.setItemDelegate(CenteredComboDelegate(combo))
+        combo.setMinimumHeight(34)
+        return combo
+
     def _build_input_controls(self):
-        self.input_combo = CenteredComboBox(animate_popup=self.config["DropdownAnimationWorkaround"])
-        self.input_combo.setItemDelegate(CenteredComboDelegate(self.input_combo))
-        self.input_combo.setMinimumHeight(34)
-        self.input_combo.activated.connect(
-            self.select_input
-        )
-
-        self.main_layout.addWidget(
-            self.input_combo,
-            self._favorite_start_row + (len(self.favorite_buttons) + 1) // 2,
-            0,
-            1,
-            2,
-        )
-
-        self.control_widgets.extend(
-            [
-                self.mute_button,
-                self.power_button,
-                self.volume_down,
-                self.volume_up,
-                self.input_combo,
-            ]
-        )
+        layout = self._section("Input")
+        self.input_combo = self._new_combo()
+        self.input_combo.activated.connect(self.select_input)
+        layout.addWidget(self.input_combo)
+        self.input_favorites_layout = QGridLayout()
+        self.input_favorites_layout.setSpacing(6)
+        self.input_favorites_layout.setColumnStretch(0, 1)
+        self.input_favorites_layout.setColumnStretch(1, 1)
+        layout.addLayout(self.input_favorites_layout)
+        self.control_widgets.append(self.input_combo)
 
     def _fit_and_lock_window(self):
         # Size the window for the configured number of favorite rows,
         # then prevent manual resizing while the app is running.
+        self.setMinimumHeight(0)
+        self.setMaximumHeight(16777215)
+        self.adjustSize()
         self.setFixedHeight(self.sizeHint().height())
 
     def _new_button(self, text):
@@ -2073,109 +2124,120 @@ class YamahaRemote(QWidget):
         return button
 
     def _apply_style(self):
-        if not self.config["DarkMode"]:
-            return
         palette = self.palette()
 
-        if self.mica_enabled:
-            palette.setColor(
-                QPalette.Window,
-                QColor(0, 0, 0, 0),
-            )
-        else:
-            palette.setColor(
-                QPalette.Window,
-                QColor(32, 32, 32),
-            )
+        if self.config["DarkMode"]:
+            if self.mica_enabled:
+                palette.setColor(QPalette.Window, QColor(0, 0, 0, 0))
+            else:
+                palette.setColor(QPalette.Window, QColor(32, 32, 32))
 
-        palette.setColor(
-            QPalette.WindowText,
-            QColor(235, 235, 235),
-        )
-        palette.setColor(
-            QPalette.Base,
-            QColor(48, 48, 48),
-        )
-        palette.setColor(
-            QPalette.AlternateBase,
-            QColor(48, 48, 48),
-        )
-        palette.setColor(
-            QPalette.Text,
-            QColor(235, 235, 235),
-        )
-        palette.setColor(
-            QPalette.Button,
-            QColor(48, 48, 48),
-        )
-        palette.setColor(
-            QPalette.ButtonText,
-            QColor(235, 235, 235),
-        )
-        palette.setColor(
-            QPalette.Highlight,
-            QColor(70, 100, 160),
-        )
-        palette.setColor(
-            QPalette.HighlightedText,
-            QColor(255, 255, 255),
-        )
+            palette.setColor(QPalette.WindowText, QColor(235, 235, 235))
+            self.setPalette(palette)
 
-        self.setPalette(palette)
-
-        if self.mica_enabled:
             self.setStyleSheet("""
-                QPushButton {
+                QWidget#remoteRoot {
+                    background: palette(window);
+                }
+                QWidget {
+                    color: #f0f0f0;
+                    font-size: 9pt;
+                }
+                QFrame#section {
+                    background: rgba(38, 38, 38, 185);
+                    border: 1px solid rgba(120, 120, 120, 110);
+                    border-radius: 8px;
+                }
+                QLabel {
+                    background: transparent;
+                }
+                QLabel#sectionTitle {
+                    color: #d6d6d6;
+                    font-weight: 600;
+                }
+                QLabel#volumeValue {
+                    font-size: 13pt;
+                    font-weight: 600;
+                }
+                QPushButton, QComboBox {
                     background-color: rgba(48, 48, 48, 185);
                     color: rgb(235, 235, 235);
                     border: 1px solid rgba(120, 120, 120, 150);
                     border-radius: 7px;
-                    padding: 5px;
+                    padding: 5px 7px;
+                    min-height: 22px;
                 }
-
-                QPushButton:hover {
-                    background-color: rgba(68, 68, 68, 205);
-                }
-
-                QPushButton:pressed {
-                    background-color: rgba(38, 38, 38, 220);
-                }
-
-                QPushButton:disabled {
-                    color: rgba(235, 235, 235, 100);
-                    background-color: rgba(48, 48, 48, 100);
-                }
-
-                QComboBox {
-                    background-color: rgba(48, 48, 48, 185);
-                    color: rgb(235, 235, 235);
-                    border: 1px solid rgba(120, 120, 120, 150);
-                    border-radius: 7px;
-                    padding: 4px 7px;
-                }
-
-                QComboBox:disabled {
-                    color: rgba(235, 235, 235, 100);
-                    background-color: rgba(48, 48, 48, 100);
-                }
-
                 QComboBox::drop-down {
                     border: none;
                     background: transparent;
                     width: 20px;
                 }
-
-
-                QComboBox QAbstractItemView {
-                    background-color: rgba(40, 40, 40, 240);
-                    color: rgb(235, 235, 235);
-                    selection-background-color: rgba(80, 110, 170, 230);
-                    border: 1px solid rgba(120, 120, 120, 150);
+                QPushButton:hover, QComboBox:hover {
+                    background-color: rgba(68, 68, 68, 205);
                 }
+                QPushButton:pressed {
+                    background-color: rgba(38, 38, 38, 220);
+                }
+                QPushButton:disabled, QComboBox:disabled:disabled {
+                    color: rgba(235, 235, 235, 100);
+                    background-color: rgba(48, 48, 48, 100);
+                }
+                QComboBox QAbstractItemView {
+                    background-color: rgb(40, 40, 40);
+                    color: rgb(235, 235, 235);
+                    selection-background-color: rgb(80, 110, 170);
+                    border: 1px solid rgb(120, 120, 120);
+                    text-align: center;
+                }
+            """)
+        else:
+            if self.mica_enabled:
+                palette.setColor(QPalette.Window, QColor(0, 0, 0, 0))
+            self.setPalette(palette)
 
+            self.setStyleSheet("""
+                QWidget#remoteRoot {
+                    background: palette(window);
+                }
+                QWidget {
+                    font-size: 9pt;
+                }
+                QFrame#section {
+                    background: rgba(255,255,255,190);
+                    border: 1px solid rgba(0,0,0,25);
+                    border-radius: 8px;
+                }
                 QLabel {
                     background: transparent;
-                    color: rgb(235, 235, 235);
+                }
+                QLabel#sectionTitle {
+                    font-weight: 600;
+                }
+                QLabel#volumeValue {
+                    font-size: 13pt;
+                    font-weight: 600;
+                }
+                QPushButton, QComboBox {
+                    background: rgba(255,255,255,215);
+                    border: 1px solid rgba(0,0,0,35);
+                    border-radius: 7px;
+                    padding: 5px 7px;
+                    min-height: 22px;
+                }
+                QComboBox::drop-down {
+                    border: none;
+                    background: transparent;
+                    width: 20px;
+                }
+                QComboBox QAbstractItemView {
+                    background-color: rgb(250, 250, 250);
+                    color: rgb(20, 20, 20);
+                    selection-background-color: rgb(210, 225, 250);
+                    border: 1px solid rgb(180, 180, 180);
+                    text-align: center;
+                }
+                QPushButton:hover, QComboBox:hover {
+                    background: rgba(245,245,245,235);
                 }
             """)
 
@@ -2208,7 +2270,7 @@ class YamahaRemote(QWidget):
         worker.signals.finished.connect(finished)
         self.pool.start(worker)
 
-    def run_action(self, action, *, background=False, batch_volume=False):
+    def run_action(self, action, *, background=False, batch_volume=False, on_result=None, on_error=None):
         if self._shutting_down or self.calibration_active:
             return False
 
@@ -2219,6 +2281,8 @@ class YamahaRemote(QWidget):
 
         def done(result):
             self.action_running = False
+            if on_result:
+                on_result(result)
             if batch_volume:
                 self._volume_batch_count += 1
             if not batch_volume or not self._continue_volume_batch():
@@ -2227,7 +2291,10 @@ class YamahaRemote(QWidget):
 
         def failed(error):
             self.action_running = False
-            self.handle_request_error(error, background=background, command=True)
+            if on_error:
+                on_error(error)
+            else:
+                self.handle_request_error(error, background=background, command=True)
             self.poll_status()
             self._schedule_hotkey_drain()
 
@@ -2264,6 +2331,7 @@ class YamahaRemote(QWidget):
         self._update_polling_state()
         self.startup_status_timer.start()
         self.load_inputs()
+        self.load_speaker_outputs()
 
     def load_inputs(self):
         if self._shutting_down:
@@ -2335,6 +2403,7 @@ class YamahaRemote(QWidget):
                     Qt.TextAlignmentRole,
                 )
 
+            self._fit_and_lock_window()
             self.poll_status()
 
         self.run_worker(
@@ -2342,6 +2411,77 @@ class YamahaRemote(QWidget):
             on_result=done,
             on_error=lambda error: self.handle_request_error(error, background=True),
         )
+
+    def load_speaker_outputs(self):
+        if self._shutting_down or self._speaker_outputs is not None or self._speaker_discovery_running:
+            return
+        self._speaker_discovery_running = True
+        def done(outputs):
+            self._speaker_outputs = outputs
+            self.speaker_combo.clear()
+            for label, state in (("Off", (False, False)), ("A", (True, False)),
+                                 ("B", (False, True)), ("A+B", (True, True))):
+                if all(not enabled or name in outputs for name, enabled in zip(("a", "b"), state)):
+                    self.speaker_combo.addItem("Speakers: " + label, state)
+            if not outputs:
+                self.speaker_combo.clear()
+                self.speaker_combo.setPlaceholderText("Speakers unavailable")
+                self.speaker_combo.setToolTip("No controllable speaker outputs are advertised by this amplifier.")
+            self._update_speaker_ui()
+            self.update_control_states()
+        self.run_worker(
+            self.api.get_speaker_outputs, on_result=done,
+            on_error=self._speaker_read_failed,
+            on_finished=lambda: setattr(self, "_speaker_discovery_running", False),
+        )
+
+    def _speaker_read_failed(self, error):
+        record_unexpected_exception(error, "Speaker status", background=True)
+        self._speaker_state = None
+        self.speaker_combo.setToolTip(f"Speaker status unavailable: {error}")
+        self._update_speaker_ui()
+        self.speaker_combo.setEnabled(False)
+
+    def _accept_speaker_state(self, state):
+        self._speaker_state = state
+        if self._speaker_target is not None:
+            if state == self._speaker_target:
+                self._speaker_target = None
+            elif self._speaker_grace_deadline is None or time.monotonic() < self._speaker_grace_deadline:
+                return  # Do not repaint a requested selection with a lagging GET.
+            else:
+                self._speaker_target = None
+        self.speaker_combo.setToolTip("Speaker outputs")
+        self._update_speaker_ui()
+
+    def _update_speaker_ui(self):
+        state = self._speaker_target if self._speaker_target is not None else self._speaker_state
+        # Qt's findData compares opaque Python tuples by identity, not value.
+        index = next((i for i in range(self.speaker_combo.count())
+                      if self.speaker_combo.itemData(i) == state), -1)
+        self.speaker_combo.setCurrentIndex(index)
+        if index < 0 and self._speaker_outputs:
+            self.speaker_combo.setPlaceholderText("Speakers: unknown")
+
+    def select_speakers(self, index):
+        target = self.speaker_combo.itemData(index)
+        if not isinstance(target, tuple) or self.calibration_active:
+            self._update_speaker_ui()
+            return
+        def done(state):
+            self._speaker_state = state
+            self._speaker_grace_deadline = time.monotonic() + SPEAKER_STATUS_GRACE_SECONDS
+            self._update_speaker_ui()
+        def failed(error):
+            self._speaker_target = None
+            self._speaker_state = None
+            self._update_speaker_ui()
+            self.handle_request_error(error, command=True)
+        if self.run_action(lambda: self.api.set_speakers(target, self._speaker_outputs),
+                           on_result=done, on_error=failed):
+            self._speaker_target = target
+            self._speaker_grace_deadline = None
+        self._update_speaker_ui()
 
     def show_connecting_status(self):
         if (
@@ -2363,8 +2503,18 @@ class YamahaRemote(QWidget):
 
         self.poll_running = True
 
+        speaker_state = speaker_error = None
+        outputs = self._speaker_outputs
         def query():
-            return self.api.get_status(), time.monotonic()
+            nonlocal speaker_state, speaker_error
+            status = self.api.get_status()
+            observed_at = time.monotonic()
+            if outputs and status.get("power") == "on":
+                try:
+                    speaker_state = self.api.get_speaker_state(outputs)
+                except Exception as error:
+                    speaker_error = error
+            return status, observed_at
 
         def done(result):
             status, observed_at = result
@@ -2378,7 +2528,16 @@ class YamahaRemote(QWidget):
             self._last_status_at = observed_at
             self._publish_hotkey_state()
             self.show_cached_status()
+            if speaker_error is not None:
+                self._speaker_read_failed(speaker_error)
+            elif speaker_state is not None:
+                self._accept_speaker_state(speaker_state)
+            elif status.get("power") != "on":
+                self._speaker_state = self._speaker_target = None
+                self._update_speaker_ui()
             self.update_control_states()
+            if self._speaker_outputs is None:
+                self.load_speaker_outputs()
 
             if not self.initialized:
                 self.load_inputs()
@@ -2440,6 +2599,8 @@ class YamahaRemote(QWidget):
         self.mute_button.setEnabled(power_on)
         self.volume_down.setEnabled(power_on)
         self.volume_up.setEnabled(power_on)
+        self.speaker_combo.setEnabled(power_on and bool(self._speaker_outputs)
+                                      and self._speaker_state is not None)
 
     def handle_request_error(self, error, *, background=False, hint=None, command=False):
         record_unexpected_exception(
@@ -2469,6 +2630,8 @@ class YamahaRemote(QWidget):
         self._last_status_at = None
         self._publish_hotkey_state()
 
+        self._speaker_state = self._speaker_target = None
+        self._update_speaker_ui()
         self.volume_value.setText("—")
         self.power_button.setText("Offline")
 
@@ -2480,6 +2643,8 @@ class YamahaRemote(QWidget):
         self.last_status = None
         self._last_status_at = None
         self._publish_hotkey_state()
+        self._speaker_state = self._speaker_target = None
+        self._update_speaker_ui()
         self.volume_value.setText("—")
         self.power_button.setText("Error")
         self.set_controls_enabled(False)
@@ -3008,6 +3173,9 @@ class YamahaRemote(QWidget):
         self._workers.clear()
         self.poll_running = False
         self.action_running = False
+        self._speaker_discovery_running = False
+        self._speaker_target = None
+        self._update_speaker_ui()
         return active_timers
 
     def _resume_background_work(self, active_timers):

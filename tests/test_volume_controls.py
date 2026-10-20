@@ -54,7 +54,7 @@ class VolumeControlTests(unittest.TestCase):
                       (window.volume_down, window.volume_value, window.volume_up)]
             self.assertLessEqual(max(widths) - min(widths), 1)
             self.assertEqual(window.volume_down.geometry().left(), window.mute_button.geometry().left())
-            self.assertEqual(window.volume_up.geometry().right(), window.power_button.geometry().right())
+            self.assertEqual(window.volume_up.geometry().right(), window.speaker_combo.geometry().right())
             self.assertEqual(window.volume_down.height(), 34)
             self.assertEqual(window.volume_up.height(), 34)
             window.hide()
@@ -62,24 +62,16 @@ class VolumeControlTests(unittest.TestCase):
             self.app.processEvents()
             self.assertEqual(window.width(), 303)
 
-    def test_input_height_matches_buttons_and_adds_four_pixels_to_window(self):
+    def test_combos_match_button_height_and_window_fits_sections(self):
         for dark in (False, True):
             with self.subTest(dark=dark):
                 window = self.window(dark)
+                window._fit_and_lock_window()
+                self.app.processEvents()
                 self.assertEqual(window.input_combo.height(), 34)
-                self.assertEqual(window.input_combo.height(), window.power_button.height())
-                new_height = window.height()
-                window.input_combo.setMinimumHeight(30)
-                window.main_layout.invalidate()
-                window._fit_and_lock_window()
-                self.app.processEvents()
-                self.assertEqual(window.input_combo.height(), 30)
-                self.assertEqual(window.height(), new_height - 4)
-                window.input_combo.setMinimumHeight(34)
-                window.main_layout.invalidate()
-                window._fit_and_lock_window()
-                self.app.processEvents()
-                self.assertEqual(window.height(), new_height)
+                self.assertEqual(window.speaker_combo.height(), 34)
+                self.assertEqual(window.input_combo.height(), window.volume_up.height())
+                self.assertEqual(window.height(), window.sizeHint().height())
 
     def test_press_is_immediate_hold_repeats_and_release_adds_no_step(self):
         window = self.window()
