@@ -438,7 +438,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.20.6"
+__version__ = "2026.10.20.7"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -2014,6 +2014,7 @@ class YamahaRemote(QWidget):
         self.main_layout.setContentsMargins(12, 12, 12, 12)
         self.main_layout.setSpacing(9)
         self.power_button = self._new_button("Standby")
+        self.power_button.setObjectName("powerButton")
         self.power_button.setMinimumHeight(38)
         self.power_button.clicked.connect(self.toggle_power)
         self.main_layout.addWidget(self.power_button)
@@ -2145,11 +2146,26 @@ class YamahaRemote(QWidget):
         background = "transparent" if self.mica_enabled else "palette(window)"
         # mica_enabled is only true on supported Windows versions.
         section_fill = ""
+        power_fill = ""
         if self.mica_enabled:
             color = "rgba(38, 38, 38, 185)" if self.config["DarkMode"] else "rgba(255,255,255,190)"
             section_fill = f"background: {color};"
+            normal, hover, pressed = (("48,48,48", "68,68,68", "38,38,38")
+                                      if self.config["DarkMode"] else
+                                      ("255,255,255", "245,245,245", "235,235,235"))
+            power_fill = f"""
+                QPushButton#powerButton {{
+                    background-color: rgb({normal});
+                    border: 1px solid palette(mid);
+                    border-radius: 7px;
+                }}
+                QPushButton#powerButton:hover {{ background-color: rgb({hover}); }}
+                QPushButton#powerButton:pressed {{ background-color: rgb({pressed}); }}
+                QPushButton#powerButton:disabled {{ background-color: rgb({normal}); }}
+            """
         self.setStyleSheet("""
             ROOT_SELECTOR { background: BACKGROUND; }
+            POWER_FILL
             QWidget { font-size: 9pt; }
             QFrame#section {
                 SECTION_FILL
@@ -2160,7 +2176,7 @@ class YamahaRemote(QWidget):
             QLabel { background: transparent; }
             QLabel#sectionTitle { font-weight: 600; }
             QLabel#volumeValue { font-size: 13pt; font-weight: 600; }
-        """.replace("ROOT_SELECTOR", "QWidget#remoteRoot").replace("BACKGROUND", background).replace("SECTION_FILL", section_fill))
+        """.replace("ROOT_SELECTOR", "QWidget#remoteRoot").replace("BACKGROUND", background).replace("SECTION_FILL", section_fill).replace("POWER_FILL", power_fill))
 
     # ----------------------------
     # Background work
