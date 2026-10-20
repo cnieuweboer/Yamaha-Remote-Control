@@ -4,13 +4,15 @@ Release identifiers below come from the corresponding commits. Some releases upd
 
 ## 2026-10-20
 
+- 2026.10.20.10 — Rename the speaker-completion callback to avoid duplicate closure names and correct the earlier Mica changelog wording. Detect missing Qt theme support before acquiring the instance lock, display an explicit upgrade message, and remove unused imports.
+
 - 2026.10.20.9 — Read the initial speaker state immediately after capability discovery so the selector does not wait for a later periodic status poll. Preserve optional-read failure isolation and the existing speaker SET grace period.
 
 - 2026.10.20.8 — With Windows Mica, restore custom button/combobox/text-input fills and outlines, hover/pressed/disabled styling, section borders, and matching dropdown colors. Use opaque control fills to keep the backdrop out of controls; other configurations retain Qt-native colors.
 
 - 2026.10.20.7 — Give the power/standby button an opaque dark/light background only with Windows Mica, including hover/pressed states. Other native controls retain Qt-managed styling.
 
-- 2026.10.20.6 — Restore compact control padding so native playback-button size hints do not widen Sony layouts. Restore previous dark/light section fills only with Windows Mica; retain Qt-managed control colors and explicit JSON theme selection.
+- 2026.10.20.6 — Restore compact control padding and previous dark/light section fills only with Windows Mica; retain Qt-managed control colors and explicit JSON theme selection.
 
 - 2026.10.20.5 — Request light/dark appearance through Qt 6.8+ platform integration. Remove fixed control colors and the manual dark title-bar override; retain layout, typography, Mica support, and live dropdown animation. Windows appearance and live desktop-theme changes require visual verification.
 

@@ -20,7 +20,7 @@ from urllib.parse import quote
 from urllib.request import build_opener, ProxyHandler
 from PySide6.QtCore import QByteArray, QEasingCurve, QElapsedTimer, QRect, QEvent, QFileInfo, QFileSystemWatcher, QObject, QLockFile, QProcess, QRunnable, QStandardPaths, QThreadPool, QTimer, Qt, Signal
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
-from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPalette
+from PySide6.QtGui import QAction, QFont, QIcon, QPalette, QStyleHints
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -28,7 +28,6 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QFrame,
     QVBoxLayout,
-    QHBoxLayout,
     QMenu,
     QLabel,
     QMessageBox,
@@ -438,7 +437,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.20.9"
+__version__ = "2026.10.20.10"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -1918,7 +1917,7 @@ class YamahaRemote(QWidget):
                 done(False, "Verified speaker control is unavailable or the request is invalid.")
                 return
             self._calibration_operation = True
-            def finish(ok, error=""):
+            def finish_speakers(ok, error=""):
                 self._calibration_operation = False
                 self.calibration_server.publish()
                 done(ok, error)
@@ -1927,13 +1926,13 @@ class YamahaRemote(QWidget):
                 state, observed_at = result
                 self._speaker_target = None
                 self._accept_speaker_state(state, observed_at)
-                finish(True)
+                finish_speakers(True)
             def failed(error):
                 self._speaker_state = self._speaker_target = None
                 self._speaker_state_at = None
                 self._update_speaker_ui()
                 self.handle_request_error(error, background=True, command=True)
-                finish(False, str(error))
+                finish_speakers(False, str(error))
             self.run_worker(lambda: (self.api.set_speakers(tuple(value), self._speaker_outputs),
                                      time.monotonic()), on_result=succeeded, on_error=failed)
             return
@@ -3291,6 +3290,17 @@ def launch_replacement(window=None):
         raise OSError("The replacement process could not be started.")
 
 
+def check_qt_theme_support():
+    if hasattr(QStyleHints, "setColorScheme"):
+        return True
+    command = 'py' if sys.platform == "win32" else 'python3'
+    QMessageBox.critical(
+        None, APP_NAME,
+        "PySide6 6.8 or newer is required for light/dark appearance.\n\n"
+        f'Upgrade with:\n{command} -m pip install --upgrade "PySide6>=6.8"')
+    return False
+
+
 def configure_app_theme(config):
     # Qt 6.8+ forwards this override to supported platform theme backends.
     QApplication.styleHints().setColorScheme(
@@ -3299,6 +3309,8 @@ def configure_app_theme(config):
 
 def _run_application():
     app = QApplication(sys.argv)
+    if not check_qt_theme_support():
+        return 1
     app.setStyle(TooltipDelayStyle())
 
     try:
