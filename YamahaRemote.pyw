@@ -438,7 +438,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.20.2"
+__version__ = "2026.10.20.3"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -1871,6 +1871,7 @@ class YamahaRemote(QWidget):
         self._speaker_outputs = None
         self._speaker_discovery_running = False
         self._speaker_state = None
+        self._speaker_state_at = None
         self._speaker_target = None
         self._speaker_grace_deadline = None
         self.input_settings = config["Inputs"]
@@ -1910,6 +1911,13 @@ class YamahaRemote(QWidget):
     def _calibration_snapshot(self):
         state = self._amplifier_snapshot()
         state.update(sample_id=self._status_sequence, role="amplifier")
+        speaker_age = (time.monotonic() - self._speaker_state_at
+                       if self._speaker_state_at is not None else HOTKEY_STATE_MAX_AGE_SECONDS)
+        state.update(speaker_outputs=list(self._speaker_outputs) if self._speaker_outputs is not None else None,
+                     speaker_state=list(self._speaker_state) if self._speaker_state is not None else None,
+                     speaker_valid_for_ms=max(0, min(int(HOTKEY_STATE_MAX_AGE_SECONDS * 1000),
+                                                   int((HOTKEY_STATE_MAX_AGE_SECONDS - speaker_age) * 1000)))
+                     if self.connected and self._speaker_state is not None else 0)
         return state
 
     def _calibration_changed(self, active):
@@ -1926,6 +1934,34 @@ class YamahaRemote(QWidget):
     def _calibration_perform(self, action, args, done):
         if self._shutting_down or missing_config_settings(self.config):
             done(False, "Device configuration is missing or the app is shutting down.")
+            return
+        if action == "set_speakers":
+            value = args.get("value")
+            if (not self.calibration_active or not self.calibration_server.token
+                    or not isinstance(value, list) or len(value) != 2
+                    or any(type(enabled) is not bool for enabled in value)
+                    or not self._speaker_outputs):
+                done(False, "Verified speaker control is unavailable or the request is invalid.")
+                return
+            self._calibration_operation = True
+            def finish(ok, error=""):
+                self._calibration_operation = False
+                self.calibration_server.publish()
+                done(ok, error)
+                self._update_polling_state(refresh=True)
+            def succeeded(result):
+                state, observed_at = result
+                self._speaker_target = None
+                self._accept_speaker_state(state, observed_at)
+                finish(True)
+            def failed(error):
+                self._speaker_state = self._speaker_target = None
+                self._speaker_state_at = None
+                self._update_speaker_ui()
+                self.handle_request_error(error, background=True, command=True)
+                finish(False, str(error))
+            self.run_worker(lambda: (self.api.set_speakers(tuple(value), self._speaker_outputs),
+                                     time.monotonic()), on_result=succeeded, on_error=failed)
             return
         if action != "acquire":
             done(False, "Unsupported calibration operation.")
@@ -2441,12 +2477,14 @@ class YamahaRemote(QWidget):
     def _speaker_read_failed(self, error):
         record_unexpected_exception(error, "Speaker status", background=True)
         self._speaker_state = None
+        self._speaker_state_at = None
         self.speaker_combo.setToolTip(f"Speaker status unavailable: {error}")
         self._update_speaker_ui()
         self.speaker_combo.setEnabled(False)
 
-    def _accept_speaker_state(self, state):
+    def _accept_speaker_state(self, state, observed_at=None):
         self._speaker_state = state
+        self._speaker_state_at = time.monotonic() if observed_at is None else observed_at
         if self._speaker_target is not None:
             if state == self._speaker_target:
                 self._speaker_target = None
@@ -2473,6 +2511,7 @@ class YamahaRemote(QWidget):
             return
         def done(state):
             self._speaker_state = state
+            self._speaker_state_at = time.monotonic()
             self._speaker_grace_deadline = time.monotonic() + SPEAKER_STATUS_GRACE_SECONDS
             self._update_speaker_ui()
         def failed(error):
@@ -2506,15 +2545,16 @@ class YamahaRemote(QWidget):
 
         self.poll_running = True
 
-        speaker_state = speaker_error = None
+        speaker_state = speaker_error = speaker_observed_at = None
         outputs = self._speaker_outputs
         def query():
-            nonlocal speaker_state, speaker_error
+            nonlocal speaker_state, speaker_error, speaker_observed_at
             status = self.api.get_status()
             observed_at = time.monotonic()
             if outputs and status.get("power") == "on":
                 try:
                     speaker_state = self.api.get_speaker_state(outputs)
+                    speaker_observed_at = time.monotonic()
                 except Exception as error:
                     speaker_error = error
             return status, observed_at
@@ -2534,7 +2574,7 @@ class YamahaRemote(QWidget):
             if speaker_error is not None:
                 self._speaker_read_failed(speaker_error)
             elif speaker_state is not None:
-                self._accept_speaker_state(speaker_state)
+                self._accept_speaker_state(speaker_state, speaker_observed_at)
             elif status.get("power") != "on":
                 self._speaker_state = self._speaker_target = None
                 self._update_speaker_ui()

@@ -1,4 +1,4 @@
-"""Amplifier calibration observes device state; mutations belong to the TV."""
+"""Calibration acquisition and exclusive speaker-only amplifier mutations."""
 from pathlib import Path
 import runpy
 from types import SimpleNamespace
@@ -114,6 +114,79 @@ class CalibrationAcquisitionTests(unittest.TestCase):
                 self.assert_no_device_commands()
         self.window._update_polling_state.assert_not_called()
         self.timer.assert_not_called()
+
+
+class CalibrationSpeakerTests(unittest.TestCase):
+    def window(self):
+        return SimpleNamespace(_shutting_down=False, config={'Host': 'device.local'},
+            calibration_active=True, calibration_server=SimpleNamespace(token='owner', publish=Mock()),
+            _speaker_outputs=('a', 'b'), _speaker_target=(False, True),
+            _speaker_state=(True, False), _speaker_state_at=99.0,
+            _calibration_operation=False, _update_polling_state=Mock(),
+            _accept_speaker_state=Mock(), _update_speaker_ui=Mock(),
+            handle_request_error=Mock(), api=SimpleNamespace(set_speakers=Mock(return_value=(False, False))),
+            run_worker=Mock())
+
+    def test_speaker_mutation_verifies_in_worker_and_publishes_before_result(self):
+        window = self.window()
+        done = Mock()
+        CLS._calibration_perform(window, 'set_speakers', {'value': [False, False]}, done)
+        self.assertTrue(window._calibration_operation)
+        function = window.run_worker.call_args.args[0]
+        callbacks = window.run_worker.call_args.kwargs
+        with patch.dict(GLOBALS, time=SimpleNamespace(monotonic=lambda: 100.0)):
+            result = function()
+        callbacks['on_result'](result)
+        window.api.set_speakers.assert_called_once_with((False, False), ('a', 'b'))
+        window._accept_speaker_state.assert_called_once_with((False, False), 100.0)
+        window.calibration_server.publish.assert_called_once()
+        done.assert_called_once_with(True, '')
+        self.assertFalse(window._calibration_operation)
+
+    def test_invalid_or_unowned_speaker_operations_never_touch_device(self):
+        for value in (None, [], [False, 1], [False, False, False]):
+            window = self.window()
+            done = Mock()
+            CLS._calibration_perform(window, 'set_speakers', {'value': value}, done)
+            self.assertFalse(done.call_args.args[0])
+            window.run_worker.assert_not_called()
+        for active, token, outputs in ((False, 'owner', ('a',)), (True, None, ('a',)), (True, 'owner', ())):
+            window = self.window()
+            window.calibration_active = active
+            window.calibration_server.token = token
+            window._speaker_outputs = outputs
+            done = Mock()
+            CLS._calibration_perform(window, 'set_speakers', {'value': [False, False]}, done)
+            self.assertFalse(done.call_args.args[0])
+            window.run_worker.assert_not_called()
+
+    def test_failed_mutation_publishes_unknown_state_without_optimism(self):
+        window = self.window()
+        done = Mock()
+        CLS._calibration_perform(window, 'set_speakers', {'value': [False, False]}, done)
+        error = REMOTE['DeviceResponseError']('Not supported')
+        window.run_worker.call_args.kwargs['on_error'](error)
+        self.assertIsNone(window._speaker_state)
+        self.assertIsNone(window._speaker_target)
+        self.assertIsNone(window._speaker_state_at)
+        self.assertFalse(window._calibration_operation)
+        window.handle_request_error.assert_called_once_with(error, background=True, command=True)
+        done.assert_called_once_with(False, 'Not supported')
+
+    def test_snapshot_reports_confirmed_state_and_its_own_freshness(self):
+        window = self.window()
+        window._status_sequence = 4
+        window.connected = True
+        window._amplifier_snapshot = lambda: {'version': 1, 'type': 'state', 'valid_for_ms': 6000}
+        with patch.dict(GLOBALS, time=SimpleNamespace(monotonic=lambda: 100.0)):
+            snapshot = CLS._calibration_snapshot(window)
+        self.assertEqual(snapshot['speaker_state'], [True, False])
+        self.assertEqual(snapshot['speaker_outputs'], ['a', 'b'])
+        self.assertEqual(snapshot['speaker_valid_for_ms'], 5000)
+        window._speaker_state_at = 90.0
+        with patch.dict(GLOBALS, time=SimpleNamespace(monotonic=lambda: 100.0)):
+            self.assertEqual(CLS._calibration_snapshot(window)['speaker_valid_for_ms'], 0)
+
 
 
 if __name__ == '__main__':

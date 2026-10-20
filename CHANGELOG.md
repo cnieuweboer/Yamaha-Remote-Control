@@ -4,6 +4,8 @@ Release identifiers below come from the corresponding commits. Some releases upd
 
 ## 2026-10-20
 
+- 2026.10.20.3 — Publish independently fresh, confirmed speaker state to calibration clients and support exclusive, verified speaker changes. Enable helper isolation and volume-first restoration without changing ordinary amplifier IPC or optimistic speaker UI. Add command and snapshot regression tests.
+
 - 2026.10.20.2 — Give Mute and the speaker selector equal-width columns, matching the favorite buttons. Use compact Off/A/B/A+B labels and keep the speaker-output tooltip.
 
 - 2026.10.20.1 — Add advertised A/B speaker-output selection using system/getFuncStatus and system/setSpeakerA/B. Optimistically display requested combinations and allow delayed GET updates, verifying unwanted outputs off before enabling others. Move controls into Sony-style Input and Volume sections, place favorites below the input selector, and fit Mute beside Speakers. Preserve standalone operation and existing input/volume/IPC behavior; add fake-device safety, timing, and layout coverage. Calibration integration is a separate follow-up.

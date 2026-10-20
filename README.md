@@ -113,7 +113,8 @@ A completed calibration supplies the amplifier's TV input and TV-scale volume di
 - **Purpose:** The Windows helper maps amplifier volume to familiar TV volume numbers for Sony Remote.
 - **Requirements:** Connect the TV to the amplifier through HDMI-CEC, run current versions of both remotes, and place `VolumeCalibration.pyw` beside `SonyRemote.pyw`.
 - **Before starting:** Turn on both devices, select the amplifier input connected to the TV, and put the TV on a silent source. Stop other playback and keep the same Windows audio output selected.
-- **Safety:** Volume can go **VERY HIGH** and the devices may unmute during calibration. Keep the source silent, avoid physical controls, and **check volume and mute on the TV, amplifier, and computer before playing sound afterward**.
+- **Speaker isolation:** The helper verifies amplifier speakers are off and restores the original combination after restoring volume. If isolation is unavailable or lost, it offers one Continue/Cancel decision for the sweep; keep all sources silent either way.
+- **Safety:** Volume can go **VERY HIGH** and the devices may unmute during calibration. Keep the source silent, avoid physical controls, and **check speaker outputs, volume, and mute on the TV, amplifier, and computer before playing sound afterward**.
 
 See the [Sony Remote calibration guide](https://github.com/cnieuweboer/Sony-Remote-Control#volume-calibration) for Start/Replace/Cancel instructions and restoration guidance.
 
