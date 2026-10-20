@@ -255,7 +255,10 @@ class SpeakerUiTests(unittest.TestCase):
     def test_input_favorites_are_below_combo_and_window_grows_to_fit(self):
         window = self.window
         before = window.height()
-        window.input_settings.update({'tv': {'Name': 'TV', 'NameOverride': '', 'Hidden': True, 'Favorite': True}})
+        window.input_settings.update({
+            'tv': {'Name': 'TV', 'NameOverride': '', 'Hidden': True, 'Favorite': True},
+            'pc': {'Name': 'PC', 'NameOverride': '', 'Hidden': False, 'Favorite': True},
+        })
         window._build_favorites_from_config()
         window._fit_and_lock_window()
         self.fixture.app.processEvents()
@@ -263,7 +266,8 @@ class SpeakerUiTests(unittest.TestCase):
         self.assertGreater(button.geometry().top(), window.input_combo.geometry().bottom())
         self.assertGreater(window.height(), before)
         self.assertEqual(window.height(), window.sizeHint().height())
-        self.assertLess(window.mute_button.width(), window.speaker_combo.width())
+        self.assertLessEqual(abs(window.mute_button.width() - window.speaker_combo.width()), 1)
+        self.assertLessEqual(abs(window.mute_button.width() - button.width()), 1)
 
 
 if __name__ == '__main__':

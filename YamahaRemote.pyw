@@ -438,7 +438,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.20.1"
+__version__ = "2026.10.20.2"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -2057,13 +2057,16 @@ class YamahaRemote(QWidget):
         self.mute_button.setToolTip("Shortcut: Volume Mute")
         self.mute_button.clicked.connect(self.toggle_mute)
         self.speaker_combo = self._new_combo()
-        self.speaker_combo.setPlaceholderText("Speakers: unknown")
+        self.speaker_combo.setAccessibleName("Speaker outputs")
+        self.speaker_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.speaker_combo.setMinimumContentsLength(1)
+        self.speaker_combo.setPlaceholderText("Speakers")
         self.speaker_combo.setToolTip("Speaker outputs")
         self.speaker_combo.activated.connect(self.select_speakers)
         row = QGridLayout()
         row.setSpacing(6)
         row.setColumnStretch(0, 1)
-        row.setColumnStretch(1, 2)
+        row.setColumnStretch(1, 1)
         row.addWidget(self.mute_button, 0, 0)
         row.addWidget(self.speaker_combo, 0, 1)
         layout.addLayout(row)
@@ -2422,10 +2425,10 @@ class YamahaRemote(QWidget):
             for label, state in (("Off", (False, False)), ("A", (True, False)),
                                  ("B", (False, True)), ("A+B", (True, True))):
                 if all(not enabled or name in outputs for name, enabled in zip(("a", "b"), state)):
-                    self.speaker_combo.addItem("Speakers: " + label, state)
+                    self.speaker_combo.addItem(label, state)
             if not outputs:
                 self.speaker_combo.clear()
-                self.speaker_combo.setPlaceholderText("Speakers unavailable")
+                self.speaker_combo.setPlaceholderText("Unavailable")
                 self.speaker_combo.setToolTip("No controllable speaker outputs are advertised by this amplifier.")
             self._update_speaker_ui()
             self.update_control_states()
@@ -2461,7 +2464,7 @@ class YamahaRemote(QWidget):
                       if self.speaker_combo.itemData(i) == state), -1)
         self.speaker_combo.setCurrentIndex(index)
         if index < 0 and self._speaker_outputs:
-            self.speaker_combo.setPlaceholderText("Speakers: unknown")
+            self.speaker_combo.setPlaceholderText("Speakers")
 
     def select_speakers(self, index):
         target = self.speaker_combo.itemData(index)
