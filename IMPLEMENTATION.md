@@ -204,3 +204,12 @@ Dropdown popups expand one Qt logical pixel left and right after native placemen
 ## Shared discovery capabilities
 
 Input and speaker discovery use one cached `system/getFeatures` response per YamahaApi instance. The existing single-thread device pool serializes access, so no additional lock or worker is needed. HTTP failures and malformed capability containers/input entries are not cached, allowing later discovery attempts to retry. Missing optional lists and valid unsupported speaker capabilities remain valid responses. A new API instance after restart/configuration changes fetches capabilities anew. `system/getNameText` and current speaker-state reads remain independent, and speaker SET verification is unchanged.
+
+
+## Local polling coordinator
+
+`PollingCoordinator` in `YamahaRemote.pyw` owns ordinary status scheduling. `update()` selects the 2000 ms normal or 250 ms calibration cadence and applies initialization, configuration, visibility, global-hotkey, connected-IPC-client, and shutdown eligibility. Hidden/minimized windows still poll when an installed global volume hook, a connected client, or calibration needs status.
+
+`request(delay_ms)` coalesces refresh requests at the earliest deadline. Requested work stays pending while hidden or while a status poll, command, or calibration operation is active. `finished()` releases deferred work after command/status completion; calibration completion re-evaluates scheduling. Periodic ticks do not queue redundant refreshes behind active work or preempt a pending settling delay. All command, discovery, and hotkey-freshness refresh requests use this entry point; `poll_status()` retains the combined device reads and result handling.
+
+`pause()` stops periodic/delayed timers and clears pending work for restart/shutdown. Failed-restart recovery uses `resume()` to re-evaluate eligibility and refresh. The existing bounded volume batching and native-hook ownership freshness remain unchanged; this adds no device or IPC polling stream. Discovery and calibration command/lease coordination remain separate. The coordinator is local to this self-contained script, with no shared runtime module.

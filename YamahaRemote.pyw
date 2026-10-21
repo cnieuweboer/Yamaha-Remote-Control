@@ -437,7 +437,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.21.2"
+__version__ = "2026.10.21.3"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -1822,6 +1822,95 @@ class CenteredComboDelegate(QStyledItemDelegate):
 # ----------------------------
 
 
+class PollingCoordinator(QObject):
+    """Own ordinary polling policy and coalesced refresh scheduling.
+
+    Device queries and their results stay in the window. Command batching
+    retains its freshness limits; pending refreshes wait for serialized work.
+    """
+
+    def __init__(self, window):
+        super().__init__(window)
+        self.window = window
+        self.paused = False
+        self.pending = False
+        self.deadline = None
+        self.periodic = QTimer(self)
+        self.periodic.timeout.connect(self._periodic_due)
+        self.refresh = QTimer(self)
+        self.refresh.setSingleShot(True)
+        self.refresh.timeout.connect(self._dispatch)
+
+    def allowed(self):
+        w = self.window
+        background_control = bool(
+            w.config["GlobalVolumeHotkeys"] and w._native_volume_hook is not None
+            and w._native_volume_hook.installed)
+        return bool(not self.paused and not w._shutting_down and w._polling_initialized
+                    and not missing_config_settings(w.config)
+                    and ((w.isVisible() and not w.isMinimized()) or background_control
+                         or w.calibration_active
+                         or bool(w.amplifier_server is not None and w.amplifier_server.clients)))
+
+    def busy(self):
+        w = self.window
+        return w.poll_running or w.action_running or w._calibration_operation
+
+    def update(self, refresh=False):
+        self.periodic.setInterval(250 if self.window.calibration_active else POLL_INTERVAL_MS)
+        if not self.allowed():
+            self.periodic.stop()
+            self.refresh.stop()
+            return
+        if not self.periodic.isActive():
+            self.periodic.start()
+        if refresh:
+            self.request()
+        elif self.pending:
+            self._arm()
+
+    def request(self, delay_ms=0):
+        deadline = time.monotonic() + max(0, delay_ms) / 1000
+        self.deadline = min(self.deadline, deadline) if self.pending else deadline
+        self.pending = True
+        if delay_ms <= 0:
+            self._dispatch()
+        else:
+            self._arm()
+
+    def _arm(self):
+        if self.allowed() and not self.busy():
+            self.refresh.start(max(0, math.ceil((self.deadline - time.monotonic()) * 1000)))
+
+    def _dispatch(self):
+        if not self.pending or not self.allowed() or self.busy():
+            return
+        self.pending = False
+        self.deadline = None
+        self.window.poll_status()
+
+    def _periodic_due(self):
+        # A cycle already running satisfies the periodic tick. A delayed
+        # command refresh keeps its settling delay instead of being preempted.
+        if not self.busy() and not self.pending:
+            self.request()
+
+    def finished(self):
+        if self.pending:
+            self._arm()
+
+    def pause(self):
+        self.paused = True
+        self.pending = False
+        self.deadline = None
+        self.periodic.stop()
+        self.refresh.stop()
+
+    def resume(self):
+        self.paused = False
+        self.update(refresh=True)
+
+
 class YamahaRemote(QWidget):
     _hotkey_ready = Signal()
 
@@ -1919,7 +2008,6 @@ class YamahaRemote(QWidget):
         self._volume_batch_count = 0
         self.calibration_active = active
         self.setEnabled(not active)
-        self.poll_timer.setInterval(250 if active else POLL_INTERVAL_MS)
         with self._hotkey_lock:
             self._calibration_key_blocked = active
             self._pending_hotkeys.clear()
@@ -1986,11 +2074,8 @@ class YamahaRemote(QWidget):
         ready()
 
     def _setup_timers(self):
-        self.poll_timer = QTimer(self)
-        self.poll_timer.setInterval(POLL_INTERVAL_MS)
-        self.poll_timer.timeout.connect(
-            self.poll_status
-        )
+        self.polling = PollingCoordinator(self)
+        self.poll_timer = self.polling.periodic
 
         self.startup_status_timer = QTimer(self)
         self.startup_status_timer.setSingleShot(True)
@@ -2265,7 +2350,8 @@ class YamahaRemote(QWidget):
             if batch_volume:
                 self._volume_batch_count += 1
             if not batch_volume or not self._continue_volume_batch():
-                self.poll_status()
+                self._request_poll()
+            self.polling.finished()
             self._schedule_hotkey_drain()
 
         def failed(error):
@@ -2274,7 +2360,8 @@ class YamahaRemote(QWidget):
                 on_error(error)
             else:
                 self.handle_request_error(error, background=background, command=True)
-            self.poll_status()
+            self._request_poll()
+            self.polling.finished()
             self._schedule_hotkey_drain()
 
         self.run_worker(action, on_result=done, on_error=failed)
@@ -2317,7 +2404,7 @@ class YamahaRemote(QWidget):
             return
 
         if self.initialized:
-            self.poll_status()
+            self._request_poll()
             return
 
         def done(inputs):
@@ -2383,7 +2470,7 @@ class YamahaRemote(QWidget):
                 )
 
             self._fit_and_lock_window()
-            self.poll_status()
+            self._request_poll()
 
         self.run_worker(
             self.api.get_inputs,
@@ -2496,7 +2583,7 @@ class YamahaRemote(QWidget):
         if not self._should_poll():
             return
 
-        if self.poll_running or self.action_running or self._calibration_operation:
+        if self.polling.busy():
             return
 
         self.poll_running = True
@@ -2546,32 +2633,18 @@ class YamahaRemote(QWidget):
             self.poll_running = False
             self.handle_request_error(error, background=True)
 
-        self.run_worker(query, on_result=done, on_error=failed)
+        self.run_worker(query, on_result=done, on_error=failed,
+                        on_finished=self.polling.finished)
 
     def _should_poll(self):
-        background_control = bool(
-            self.config["GlobalVolumeHotkeys"] and self._native_volume_hook is not None
-            and self._native_volume_hook.installed
-        )
-        return bool(
-            not self._shutting_down and self._polling_initialized
-            and not missing_config_settings(self.config)
-            and ((self.isVisible() and not self.isMinimized()) or background_control or self.calibration_active
-                 or bool(self.amplifier_server is not None and self.amplifier_server.clients))
-        )
+        return self.polling.allowed()
 
+    def _request_poll(self, delay_ms=0):
+        self.polling.request(delay_ms)
 
     def _update_polling_state(self, refresh=False):
-        if self._shutting_down or not hasattr(self, "poll_timer"):
-            return
-        should_poll = self._should_poll()
-        if should_poll:
-            if refresh:
-                self.poll_status()
-            if not self.poll_timer.isActive():
-                self.poll_timer.start()
-        else:
-            self.poll_timer.stop()
+        if hasattr(self, "polling"):
+            self.polling.update(refresh=refresh)
 
     # ----------------------------
     # State and request errors
@@ -2914,7 +2987,7 @@ class YamahaRemote(QWidget):
             ))
             command = None if refresh else self._pending_hotkeys.popleft()
         if refresh:
-            self.poll_status()
+            self._request_poll()
             return
         if isinstance(command, tuple):
             command, expected_input = command
@@ -3153,6 +3226,7 @@ class YamahaRemote(QWidget):
     def _pause_background_work(self):
         self._volume_batch_count = 0
         self._shutting_down = True
+        self.polling.pause()
         if self.activation_server is not None:
             self.activation_server.close()
         if self.calibration_server is not None:
@@ -3191,7 +3265,7 @@ class YamahaRemote(QWidget):
         if not missing_config_settings(self.config):
             self.update_control_states()
             self.load_inputs()
-        self._update_polling_state(refresh=True)
+        self.polling.resume()
 
     def _shutdown(self):
         if self._shutdown_complete:

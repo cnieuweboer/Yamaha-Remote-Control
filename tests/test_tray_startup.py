@@ -203,7 +203,8 @@ class HiddenPollingTests(unittest.TestCase):
             amplifier_server=SimpleNamespace(clients={}),
             isVisible=lambda: False, isMinimized=lambda: False,
         )
-        poll = REMOTE['YamahaRemote']._should_poll
+        coordinator = SimpleNamespace(window=window, paused=False)
+        poll = lambda w: REMOTE['PollingCoordinator'].allowed(coordinator)
         self.assertTrue(poll(window))
         window.config['GlobalVolumeHotkeys'] = False
         self.assertFalse(poll(window))
