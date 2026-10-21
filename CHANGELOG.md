@@ -4,6 +4,8 @@ Release identifiers below come from the corresponding commits. Some releases upd
 
 ## 2026-10-21
 
+- Yamaha Remote 2026.10.21.7 — Elide long closed-combobox and favorite labels at the right edge, keeping the leading text. Keep favorite columns equal and prevent names from widening the layout. Truncation follows available pixel width; full names and action targets remain intact. Popup-list rendering is unchanged.
+
 - Yamaha Remote 2026.10.21.6 — Clarify the half-interval freshness conversion, keep activation deadlines/retry sleeps in seconds with conversion only at Qt waits, and share a local validity helper between main and speaker IPC snapshots. Add boundary checks and a real-window periodic-timer/event-refresh regression. Timing defaults and wire format are unchanged.
 
 - Yamaha Remote 2026.10.21.5 — Always pass polling groups explicitly when dispatching refreshes; remove the redundant all-groups branch. Remove the Yamaha polling-eligibility forwarding method and unused test-fixture fields. Keep the defensive shutdown timer stops.

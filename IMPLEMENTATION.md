@@ -226,3 +226,10 @@ Python-side deadlines, ages, retry sleeps, and timeout budgets use seconds. Conv
 `remaining_validity_ms(age_seconds, max_age_seconds)` clamps expired/future observations and converts the remaining lifetime to whole wire milliseconds. Main and speaker snapshots use this same local helper with the existing six-second `HOTKEY_STATE_MAX_AGE_SECONDS` policy. No timing default or IPC protocol limit changes.
 
 The real-window test in `test_speakers.py` temporarily shortens the periodic interval and freshness window, schedules a main-status refresh between ticks, and uses real Qt timers and worker dispatch with fake API responses. It checks pending suppression on the first tick, fresh-response suppression on the next, eventual main polling resumption, and continued speaker reads. No manual periodic dispatch or mocked `poll_status()` is used. Time-unit tests cover validity boundaries and the activation retry budget; existing real-socket activation tests cover successful handshakes.
+
+
+## Long display names
+
+Closed combobox labels use Qt font-metric right elision within the existing centered edit rectangle. Popup view/delegate rendering and animation are unchanged. Combobox horizontal size policy ignores content length so long names do not enlarge the layout.
+
+`FavoriteButton` preserves the complete QPushButton text and existing click targets, but uses an ignored horizontal size hint to keep the two stretched grid columns equal. Its native style option receives a right-elided label sized to the style's content rectangle, preserving platform styling, padding, focus, hover, and disabled states. No fixed character limit or JSON truncation is introduced; the wider combobox naturally displays more characters. Offscreen tests check actual painted labels, unchanged short labels, stable window/column widths, retained data, and reused click targets.

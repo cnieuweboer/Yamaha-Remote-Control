@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
     QProxyStyle,
     QStyle,
     QStylePainter,
-    QStyleOptionComboBox,
+    QStyleOptionButton, QSizePolicy, QStyleOptionComboBox,
     QStyledItemDelegate,
     QSystemTrayIcon,
     QWidget,
@@ -437,7 +437,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.21.6"
+__version__ = "2026.10.21.7"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -1647,9 +1647,28 @@ class DraggableLabel(QLabel):
         super().mousePressEvent(event)
 
 
+class FavoriteButton(QPushButton):
+    """Keep favorite columns equal; elide only the painted label."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        self.setMinimumHeight(34)
+
+    def paintEvent(self, event):
+        painter = QStylePainter(self)
+        option = QStyleOptionButton()
+        self.initStyleOption(option)
+        contents = self.style().subElementRect(QStyle.SE_PushButtonContents, option, self)
+        option.text = self.fontMetrics().elidedText(
+            option.text, Qt.ElideRight, max(0, contents.width()), Qt.TextShowMnemonic)
+        painter.drawControl(QStyle.CE_PushButton, option)
+
+
 class CenteredComboBox(QComboBox):
     def __init__(self, parent=None, *, animate_popup=False):
         super().__init__(parent)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self._animate_popup = animate_popup
         self._popup = None
         self._popup_view = None
@@ -1808,6 +1827,7 @@ class CenteredComboBox(QComboBox):
 
         group = QPalette.Active if self.isEnabled() else QPalette.Disabled
         painter.setPen(option.palette.color(group, QPalette.Text))
+        text = self.fontMetrics().elidedText(text, Qt.ElideRight, max(0, rect.width()))
         painter.drawText(rect, Qt.AlignCenter, text)
 
 
@@ -2239,7 +2259,7 @@ class YamahaRemote(QWidget):
         for index, (input_id, settings) in enumerate(favorites):
             button = buttons.pop(input_id, None)
             if button is None:
-                button = self._new_button("")
+                button = FavoriteButton()
                 button.clicked.connect(lambda checked=False, input_id=input_id: self.set_input(input_id))
                 self.control_widgets.append(button)
             button.setText(_entry_display_name(settings))

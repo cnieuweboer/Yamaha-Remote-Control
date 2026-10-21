@@ -70,7 +70,7 @@ Speaker selection updates immediately while the amplifier applies and confirms t
 - `DropdownAnimationWorkaround` — use a live 200 ms input-dropdown animation to avoid dropdown flicker on Windows (enabled by default on Windows). Set to `false` for the standard Qt dropdown; disabled system animations remain disabled.
 - `Inputs` — settings for the inputs discovered from the Yamaha device.
   - `Name` — name reported by the Yamaha device. This is updated automatically.
-  - `NameOverride` — optional replacement name shown in the dropdown and on favorite buttons.
+  - `NameOverride` — optional replacement name shown in the dropdown and on favorite buttons. Long closed labels end with an ellipsis; favorite buttons keep equal widths.
   - `Hidden` — hide the input from the dropdown menu. Hidden inputs can still be favorites.
   - `Favorite` — show a button for the input directly in the remote.
 - `SystemTray` — show a system tray icon when the desktop supports it. If unavailable, the app runs as an ordinary window.
