@@ -1,4 +1,5 @@
 import ctypes
+import copy
 from datetime import datetime
 import faulthandler
 import hashlib
@@ -20,7 +21,7 @@ from urllib.parse import quote
 from urllib.request import build_opener, ProxyHandler
 from PySide6.QtCore import QByteArray, QEasingCurve, QElapsedTimer, QRect, QEvent, QFileInfo, QFileSystemWatcher, QObject, QLockFile, QProcess, QRunnable, QStandardPaths, QThreadPool, QTimer, Qt, Signal
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
-from PySide6.QtGui import QAction, QFont, QIcon, QPalette, QStyleHints
+from PySide6.QtGui import QAction, QKeySequence, QFont, QIcon, QPalette, QStyleHints
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -437,7 +438,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.21.7"
+__version__ = "2026.10.21.8"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -464,7 +465,22 @@ VOLUME_BATCH_MAX_AGE_SECONDS = 1.0
 # ----------------------------
 
 
+DEFAULT_SHORTCUTS = {
+    "VolumeUp": ["Volume Up"],
+    "VolumeDown": ["Volume Down"],
+    "Mute": ["Volume Mute"],
+}
+
+
+SHORTCUT_ACTIONS = {
+    "VolumeUp": "volume_up",
+    "VolumeDown": "volume_down",
+    "Mute": "mute",
+}
+
+
 DEFAULT_CONFIG = {
+    "Shortcuts": DEFAULT_SHORTCUTS,
     "Host": "",
     "DarkMode": True,
     "Mica": False,
@@ -646,11 +662,67 @@ def _ordered_entries(entries, sort_by_name):
     return items
 
 
+def _validate_shortcuts(raw):
+    if not isinstance(raw, dict):
+        raise ConfigError('"Shortcuts" must be an object.')
+    unknown = set(raw) - set(DEFAULT_SHORTCUTS)
+    if unknown:
+        raise ConfigError('Unknown shortcut action(s): ' + ', '.join(sorted(unknown)) + '.')
+    normalized, owners = {}, {}
+    for action, defaults in DEFAULT_SHORTCUTS.items():
+        bindings = raw.get(action, defaults)
+        if bindings == "":
+            bindings = []
+        if not isinstance(bindings, list):
+            raise ConfigError(f'Shortcuts.{action} must be a list of key strings, or empty to disable.')
+        normalized[action] = []
+        for text in bindings:
+            if not isinstance(text, str) or not text.strip():
+                raise ConfigError(f'Shortcuts.{action} contains an empty or invalid key.')
+            sequence = QKeySequence.fromString(text.strip(), QKeySequence.PortableText)
+            if (sequence.count() != 1 or sequence[0].key() in (Qt.Key_unknown, 0)
+                    or not sequence.toString(QKeySequence.PortableText)):
+                raise ConfigError(f'Shortcuts.{action}: invalid single-key combination {text!r}.')
+            code = sequence[0].toCombined()
+            canonical = sequence.toString(QKeySequence.PortableText)
+            if code in owners:
+                raise ConfigError(f'Shortcut {canonical!r} is assigned more than once '
+                                  f'({owners[code]} and {action}).')
+            owners[code] = action
+            normalized[action].append(canonical)
+    return normalized
+
+
+def _compile_shortcuts(config):
+    return {QKeySequence.fromString(text, QKeySequence.PortableText)[0].toCombined():
+            SHORTCUT_ACTIONS[action]
+            for action, bindings in config["Shortcuts"].items() for text in bindings}
+
+
+def _shortcut_code(event):
+    return event.key() | event.modifiers().value
+
+
+def _focused_shortcut_command(bindings, event):
+    code = _shortcut_code(event)
+    command = bindings.get(code)
+    # Printable punctuation already encodes Shift on many layouts (e.g. '+').
+    # Prefer an explicitly modified binding, then accept the literal symbol.
+    if (command is None and event.modifiers() & Qt.ShiftModifier
+            and 0x21 <= event.key() <= 0x7E and not chr(event.key()).isalnum()):
+        command = bindings.get(code & ~Qt.ShiftModifier.value)
+    return command
+
+
+def _shortcut_tip(config, command):
+    action = next((name for name, value in SHORTCUT_ACTIONS.items() if value == command), None)
+    labels = [QKeySequence.fromString(text, QKeySequence.PortableText).toString(QKeySequence.NativeText)
+              for text in config["Shortcuts"].get(action, [])]
+    return "Shortcut: " + " / ".join(labels) if labels else ""
+
+
 def _default_config_copy():
-    return {
-        key: value.copy() if isinstance(value, (dict, list)) else value
-        for key, value in DEFAULT_CONFIG.items()
-    }
+    return copy.deepcopy(DEFAULT_CONFIG)
 
 
 def missing_config_settings(config):
@@ -681,6 +753,7 @@ def validate_config(raw_config, *, allow_incomplete=False):
 
     config = _default_config_copy()
     config.update(raw_config)
+    config["Shortcuts"] = _validate_shortcuts(config["Shortcuts"])
 
     config["Host"] = _validate_host(config["Host"])
     for key in BOOLEAN_CONFIG_KEYS:
@@ -716,11 +789,8 @@ def load_config():
         return validate_config(config, allow_incomplete=True)
 
     try:
-        with config_path.open(
-            "r",
-            encoding="utf-8",
-        ) as f:
-            raw_config = json.load(f)
+        content = config_path.read_bytes()
+        raw_config = json.loads(content.decode("utf-8"))
     except json.JSONDecodeError as ex:
         raise ConfigError(
             "Invalid JSON syntax in "
@@ -734,7 +804,12 @@ def load_config():
             f"Unable to read {config_path.name}: {ex}"
         ) from ex
 
-    return validate_config(raw_config, allow_incomplete=True)
+    config = validate_config(raw_config, allow_incomplete=True)
+    if "Shortcuts" not in raw_config or set(DEFAULT_SHORTCUTS) - set(raw_config["Shortcuts"]):
+        updated = dict(raw_config)
+        updated["Shortcuts"] = config["Shortcuts"]
+        save_config(updated, expected_digest=hashlib.sha256(content).digest())
+    return config
 
 
 def save_config(config, *, expected_digest=None):
@@ -989,11 +1064,17 @@ def get_app_icon():
 # Only these three media keys belong to the amplifier remote.
 _VOLUME_KEYS = {0xAF: "volume_up", 0xAE: "volume_down", 0xAD: "mute"}
 _RETAINED_VOLUME_HOOKS = []
-_QT_VOLUME_KEYS = {
-    Qt.Key_VolumeUp: "volume_up",
-    Qt.Key_VolumeDown: "volume_down",
-    Qt.Key_VolumeMute: "mute",
-}
+
+
+
+_NATIVE_QT_VOLUME_KEYS = {0xAF: Qt.Key_VolumeUp.value, 0xAE: Qt.Key_VolumeDown.value,
+                          0xAD: Qt.Key_VolumeMute.value}
+
+
+def _native_shortcut_modifiers(user32):
+    return sum(mask for keys, mask in (((0x10,), 0x02000000), ((0x11,), 0x04000000),
+                                      ((0x12,), 0x08000000), ((0x5B, 0x5C), 0x10000000))
+               if any(user32.GetAsyncKeyState(key) & 0x8000 for key in keys))
 
 
 class _VolumeKeyState:
@@ -1001,18 +1082,27 @@ class _VolumeKeyState:
 
     def __init__(self):
         self.pressed = {}
+        self.commands = {}
+
+    def clear(self):
+        self.pressed.clear()
+        self.commands.clear()
 
     def press(self, key, command, accept):
         if key in self.pressed:
             owned = self.pressed[key]
-            if owned and command != "mute":
-                accept(command)
+            original = self.commands.get(key, command)
+            if owned and original not in ("mute", "PlayPause"):
+                accept(original)
             return owned
         owned = bool(accept(command))
         self.pressed[key] = owned
+        if owned:
+            self.commands[key] = command
         return owned
 
     def release(self, key):
+        self.commands.pop(key, None)
         return self.pressed.pop(key, False)
 
 
@@ -1066,9 +1156,10 @@ def _load_volume_hook_api():
 class _WindowsVolumeHook(QObject):
     changed = Signal(bool, object)
 
-    def __init__(self, accept, parent=None):
+    def __init__(self, accept, parent=None, *, resolve=None):
         super().__init__(parent)
         self._accept = accept
+        self._resolve = resolve
         self._keys = _VolumeKeyState()
         self._hook = None
         self._callback = None
@@ -1108,6 +1199,7 @@ class _WindowsVolumeHook(QObject):
             if self._stopping.is_set():
                 return
             # Do not seize keys that were already held when the app started.
+            self._keys.clear()
             self._keys.pressed = {
                 key: False for key in _VOLUME_KEYS
                 if self._user32.GetAsyncKeyState(key) & 0x8000
@@ -1153,9 +1245,12 @@ class _WindowsVolumeHook(QObject):
                 data = ctypes.cast(address, ctypes.POINTER(_LowLevelKey)).contents
                 key = data.vkCode
                 command = _VOLUME_KEYS.get(key)
+                if command is not None and self._resolve is not None:
+                    command = self._keys.commands.get(key) or self._resolve(
+                        key, _native_shortcut_modifiers(self._user32))
                 # Remappers can generate injected volume-key events. They are
                 # safe to handle too: this remote never synthesizes key events.
-                if command:
+                if command or key in self._keys.pressed:
                     if message in (0x101, 0x105):
                         owned = self._keys.release(data.vkCode)
                     else:
@@ -1984,6 +2079,7 @@ class YamahaRemote(QWidget):
     def __init__(self, config):
         super().__init__()
         self.config = config
+        self._shortcut_bindings = _compile_shortcuts(config)
         self.calibration_active = False
         self._calibration_key_blocked = False
         self.amplifier_server = None
@@ -2150,7 +2246,7 @@ class YamahaRemote(QWidget):
         app.installEventFilter(self)
         self._hotkey_ready.connect(self._drain_hotkeys, Qt.QueuedConnection)
         if sys.platform == "win32":
-            self._native_volume_hook = _WindowsVolumeHook(self._accept_native_hotkey, self)
+            self._native_volume_hook = _WindowsVolumeHook(self._accept_native_hotkey, self, resolve=self._resolve_native_volume)
             self._native_volume_hook.changed.connect(self._native_hotkey_changed)
             self._publish_hotkey_state()
             try:
@@ -2218,7 +2314,7 @@ class YamahaRemote(QWidget):
             font = button.font()
             font.setPointSizeF(9)
             button.setFont(font)
-            button.setToolTip("Shortcut: Volume " + ("Down" if direction < 0 else "Up"))
+            button.setToolTip(_shortcut_tip(self.config, "volume_down" if direction < 0 else "volume_up"))
             button.setAutoRepeat(True)
             button.setAutoRepeatDelay(500)
             button.setAutoRepeatInterval(100)
@@ -2231,7 +2327,7 @@ class YamahaRemote(QWidget):
             volume_row.addWidget(widget, 0, column)
         layout.addLayout(volume_row)
         self.mute_button = self._new_button("Mute")
-        self.mute_button.setToolTip("Shortcut: Volume Mute")
+        self.mute_button.setToolTip(_shortcut_tip(self.config, "mute"))
         self.mute_button.clicked.connect(self.toggle_mute)
         self.speaker_combo = self._new_combo()
         self.speaker_combo.setAccessibleName("Speaker outputs")
@@ -2994,7 +3090,7 @@ class YamahaRemote(QWidget):
         state = (
             self._volume_hotkeys_eligible(), self.config["GlobalVolumeHotkeys"],
             int(self.winId()) if sys.platform == "win32" and self.isVisible() and not self.isMinimized() else 0,
-            self._last_status_at, QApplication.activeModalWidget() is not None,
+            self._last_status_at, (QApplication.activeModalWidget() is not None or QApplication.activePopupWidget() is not None),
         )
         with self._hotkey_lock:
             self._hotkey_state = state
@@ -3009,6 +3105,12 @@ class YamahaRemote(QWidget):
         self._hotkey_state_refresh_pending = False
         if not self._shutting_down:
             self._publish_hotkey_state()
+
+    def _resolve_native_volume(self, key, modifiers):
+        # Global bindings remain the physical media keys until phase two.
+        if self._calibration_key_blocked or self._hotkey_state[1]:
+            return _VOLUME_KEYS.get(key)
+        return self._shortcut_bindings.get(_NATIVE_QT_VOLUME_KEYS[key] | modifiers)
 
     def _accept_native_hotkey(self, command, foreground):
         with self._hotkey_lock:
@@ -3040,6 +3142,7 @@ class YamahaRemote(QWidget):
             return command in _VOLUME_KEYS.values()
         if (command not in _VOLUME_KEYS.values() or not self.isActiveWindow()
                 or QApplication.activeModalWidget() is not None
+                or QApplication.activePopupWidget() is not None
                 or not self._volume_hotkeys_eligible()):
             return False
         with self._hotkey_lock:
@@ -3082,21 +3185,37 @@ class YamahaRemote(QWidget):
     def eventFilter(self, watched, event):
         event_type = event.type()
         if event_type in (QEvent.Show, QEvent.Hide, QEvent.WindowActivate, QEvent.WindowDeactivate):
+            if watched is self and event_type in (QEvent.Hide, QEvent.WindowDeactivate):
+                self._qt_volume_keys.clear()
             if not self._hotkey_state_refresh_pending and not self._shutting_down:
                 self._hotkey_state_refresh_pending = True
                 QTimer.singleShot(0, self._refresh_hotkey_state)
-        if event_type not in (QEvent.KeyPress, QEvent.KeyRelease):
-            return super().eventFilter(watched, event)
-        command = _QT_VOLUME_KEYS.get(event.key())
-        # Windows' native hook already handles both focused and global keys.
-        if command is None or (self._native_volume_hook is not None and self._native_volume_hook.installed):
+        if event_type not in (QEvent.ShortcutOverride, QEvent.KeyPress, QEvent.KeyRelease):
             return super().eventFilter(watched, event)
         if event_type == QEvent.KeyRelease:
-            owned = self._qt_volume_keys.pressed.get(event.key(), False) if event.isAutoRepeat() else self._qt_volume_keys.release(event.key())
-        else:
-            if event.isAutoRepeat() and event.key() not in self._qt_volume_keys.pressed:
-                self._qt_volume_keys.pressed[event.key()] = False
-            owned = self._qt_volume_keys.press(event.key(), command, self._accept_focused_hotkey)
+            owned = (self._qt_volume_keys.pressed.get(event.key(), False) if event.isAutoRepeat()
+                     else self._qt_volume_keys.release(event.key()))
+            if owned:
+                event.accept()
+                return True
+            return super().eventFilter(watched, event)
+        command = _focused_shortcut_command(self._shortcut_bindings, event)
+        # Windows' native hook already handles both focused and global keys.
+        if ((event.key() in _NATIVE_QT_VOLUME_KEYS.values() and self._native_volume_hook is not None
+             and self._native_volume_hook.installed)
+                or QApplication.activePopupWidget() is not None):
+            return super().eventFilter(watched, event)
+        if event_type == QEvent.ShortcutOverride:
+            if (command and self.isActiveWindow() and self._volume_hotkeys_eligible()
+                    and QApplication.activeModalWidget() is None):
+                event.accept()
+                return True
+            return super().eventFilter(watched, event)
+        if command is None:
+            return super().eventFilter(watched, event)
+        if event.isAutoRepeat() and event.key() not in self._qt_volume_keys.pressed:
+            self._qt_volume_keys.pressed[event.key()] = False
+        owned = self._qt_volume_keys.press(event.key(), command, self._accept_focused_hotkey)
         if owned:
             event.accept()
             return True
@@ -3312,7 +3431,7 @@ class YamahaRemote(QWidget):
             self.calibration_server.close()
         self._publish_hotkey_state()
         self.amplifier_server.close()
-        self._qt_volume_keys.pressed.clear()
+        self._qt_volume_keys.clear()
         self._worker_generation += 1
         timers = (self.poll_timer, self.startup_status_timer, self.config_restart_timer)
         active_timers = [timer for timer in timers if timer.isActive()]
@@ -3376,14 +3495,14 @@ class YamahaRemote(QWidget):
     def hideEvent(self, event):
         super().hideEvent(event)
         self._publish_hotkey_state()
-        self._qt_volume_keys.pressed.clear()
+        self._qt_volume_keys.clear()
         self._update_polling_state()
 
     def changeEvent(self, event):
         super().changeEvent(event)
         self._publish_hotkey_state()
         if event.type() == QEvent.ActivationChange and not self.isActiveWindow():
-            self._qt_volume_keys.pressed.clear()
+            self._qt_volume_keys.clear()
         if event.type() == QEvent.WindowStateChange:
             QTimer.singleShot(
                 0,

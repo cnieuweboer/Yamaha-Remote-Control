@@ -11,5 +11,16 @@
   "DropdownAnimationWorkaround": true,
   "Inputs": {},
   "SystemTray": false,
-  "CloseToTray": false
+  "CloseToTray": false,
+  "Shortcuts": {
+    "VolumeUp": [
+      "Volume Up"
+    ],
+    "VolumeDown": [
+      "Volume Down"
+    ],
+    "Mute": [
+      "Volume Mute"
+    ]
+  }
 }
