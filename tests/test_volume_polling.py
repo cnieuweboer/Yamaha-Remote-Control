@@ -20,8 +20,8 @@ class VolumePollingTests(unittest.TestCase):
             last_status={'input': 'tv', 'volume': 20}, poll_status=Mock(),
             _schedule_hotkey_drain=Mock(), handle_request_error=Mock(),
         )
-        window._request_poll = window.poll_status
-        window.polling = SimpleNamespace(finished=Mock())
+        window._request_poll = lambda delay_ms=0, groups=None: window.poll_status()
+        window.polling = SimpleNamespace(finished=Mock(), invalidate=Mock(), GROUPS={'main', 'speakers'})
         window._continue_volume_batch = lambda: CLS._continue_volume_batch(window)
         self.callbacks = []
         window.run_worker = lambda action, **callbacks: self.callbacks.append((action, callbacks))

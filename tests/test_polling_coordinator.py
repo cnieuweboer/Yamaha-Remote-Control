@@ -2,7 +2,7 @@
 from pathlib import Path
 import runpy
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
@@ -22,6 +22,8 @@ class PollingTests(unittest.TestCase):
         self.w.calibration_active = self.w.poll_running = False
         self.w._volume_rate_loop_running = self.w._volume_rate_step_running = False
         self.w._amplifier_routed = False
+        self.w._speaker_outputs = ('a', 'b')
+        self.w._speaker_discovery_running = False
         self.w.action_running = self.w._calibration_operation = False
         self.w._polling_initialized = True
         self.w._native_volume_hook = None
@@ -126,7 +128,7 @@ class PollingTests(unittest.TestCase):
         self.assertFalse(self.p.pending)
         self.w.poll_running = False
         self.p._periodic_due()
-        self.w.poll_status.assert_called_once_with()
+        self.w.poll_status.assert_called_once_with(groups=self.p.GROUPS)
 
     def test_initialization_gate(self):
         self.w._polling_initialized = False
@@ -136,3 +138,66 @@ class PollingTests(unittest.TestCase):
         self.p.update()
         QTest.qWait(10)
         self.w.poll_status.assert_called_once_with()
+
+    def test_fresh_main_status_does_not_suppress_speaker_reads(self):
+        self.p.observed('main', 100)
+        with patch.object(REMOTE['time'], 'monotonic', return_value=100.5):
+            self.p._periodic_due()
+        self.w.poll_status.assert_called_once_with(groups={'speakers'})
+        self.w.poll_status.reset_mock()
+        with patch.object(REMOTE['time'], 'monotonic', return_value=101):
+            self.p._periodic_due()
+        self.w.poll_status.assert_called_once_with(groups=self.p.GROUPS)
+
+    def test_pending_main_refresh_leaves_speakers_available(self):
+        self.p.request(500, groups={'main'})
+        self.p._periodic_due()
+        self.w.poll_status.assert_called_once_with(groups={'speakers'})
+        self.assertNotIn('main', self.p._observed)
+
+    def test_failed_refresh_is_not_fresh_and_can_retry(self):
+        self.p.observed('main', REMOTE['time'].monotonic())
+        self.p.request(groups={'main'})
+        self.w.poll_status.assert_called_once_with(groups={'main'})
+        self.assertFalse(self.p.pending)
+        self.w.poll_status.reset_mock()
+        self.p._periodic_due()
+        self.w.poll_status.assert_called_once_with(groups=self.p.GROUPS)
+
+    def test_independent_group_deadlines(self):
+        self.p.request(10, groups={'main'})
+        self.p.request(100, groups={'speakers'})
+        QTest.qWait(40)
+        self.w.poll_status.assert_called_once_with(groups={'main'})
+        QTest.qWait(100)
+        self.assertEqual(self.w.poll_status.call_count, 2)
+        self.assertEqual(self.w.poll_status.call_args.kwargs['groups'], {'speakers'})
+
+    def test_calibration_bypasses_freshness(self):
+        for group in self.p.GROUPS:
+            self.p.observed(group, REMOTE['time'].monotonic())
+        self.w.calibration_active = True
+        self.p._periodic_due()
+        self.w.poll_status.assert_called_once_with(groups=self.p.GROUPS)
+
+    def test_update_does_not_reset_periodic_timer(self):
+        self.p.update()
+        QTest.qWait(30)
+        remaining = self.p.periodic.remainingTime()
+        self.p.update(refresh=True)
+        self.assertLessEqual(self.p.periodic.remainingTime(), remaining)
+
+    def test_speaker_refresh_waits_for_discovery(self):
+        self.w._speaker_discovery_running = True
+        self.p.request(groups={'speakers'})
+        self.assertTrue(self.p.pending)
+        self.w.poll_status.assert_not_called()
+        self.w._speaker_discovery_running = False
+        self.p.finished()
+        QTest.qWait(10)
+        self.w.poll_status.assert_called_once_with(groups={'speakers'})
+
+    def test_unsupported_speakers_are_not_periodically_requested(self):
+        self.w._speaker_outputs = ()
+        self.p._periodic_due()
+        self.w.poll_status.assert_called_once_with(groups={'main'})

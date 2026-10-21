@@ -225,7 +225,7 @@ class SpeakerUiTests(unittest.TestCase):
         self.assertEqual(self.window.speaker_combo.currentData(), target)
         self.window._accept_speaker_state((True, False))
         self.assertEqual(self.window.speaker_combo.currentData(), target)
-        run.call_args.kwargs['on_result'](target)
+        run.call_args.kwargs['on_result']((target, time.monotonic()))
         self.window._accept_speaker_state((True, False))
         self.assertEqual(self.window.speaker_combo.currentData(), target)
         deadline = self.window._speaker_grace_deadline
@@ -317,6 +317,83 @@ class SpeakerUiTests(unittest.TestCase):
         self.assertFalse(window.speaker_combo.isEnabled())
         self.assertTrue(window.volume_up.isEnabled())
         self.assertTrue(window.power_button.isEnabled())
+
+    def poll_groups(self, groups):
+        def worker(function, **callbacks):
+            try:
+                result = function()
+            except Exception as error:
+                callbacks['on_error'](error)
+            else:
+                callbacks['on_result'](result)
+            callbacks['on_finished']()
+        self.window.initialized = True
+        with patch.object(self.window, '_should_poll', return_value=True), \
+             patch.object(self.window, 'run_worker', side_effect=worker):
+            self.window.poll_status(groups=groups)
+
+    def test_main_only_followup_reuses_recent_speaker_status(self):
+        self.discover()
+        status = dict(self.window.last_status, volume=31)
+        with patch.object(self.window.api, 'get_status', return_value=status) as main, \
+             patch.object(self.window.api, 'get_speaker_state') as speakers:
+            self.poll_groups({'main'})
+        main.assert_called_once_with()
+        speakers.assert_not_called()
+        self.assertEqual(self.window.last_status['volume'], 31)
+        self.assertNotIn('main', self.window.polling.periodic_groups())
+        self.assertNotIn('speakers', self.window.polling.periodic_groups())
+
+    def test_speaker_only_response_does_not_refresh_main_or_hotkey_freshness(self):
+        self.discover()
+        self.window._last_status_at = 123
+        self.window._volume_batch_count = 2
+        self.window.polling.invalidate({'main'})
+        sequence = self.window._status_sequence
+        with patch.object(self.window.api, 'get_status') as main, \
+             patch.object(self.window.api, 'get_speaker_state', return_value=(False, True)) as speakers:
+            self.poll_groups({'speakers'})
+        main.assert_not_called()
+        speakers.assert_called_once_with(('a', 'b'))
+        self.assertEqual(self.window._last_status_at, 123)
+        self.assertEqual(self.window._volume_batch_count, 2)
+        self.assertEqual(self.window._status_sequence, sequence)
+        self.assertEqual(self.window._speaker_state, (False, True))
+        self.assertIn('main', self.window.polling.periodic_groups())
+        self.assertNotIn('speakers', self.window.polling.periodic_groups())
+
+    def test_failed_speaker_only_read_keeps_main_state_and_allows_retry(self):
+        self.discover()
+        self.window.polling.observed('main', time.monotonic())
+        with patch.object(self.window.api, 'get_status') as main, \
+             patch.object(self.window.api, 'get_speaker_state',
+                          side_effect=ui_fixture.REMOTE['DeviceResponseError']('Unavailable')):
+            self.poll_groups({'speakers'})
+        main.assert_not_called()
+        self.assertTrue(self.window.connected)
+        self.assertTrue(self.window.volume_up.isEnabled())
+        self.assertFalse(self.window.speaker_combo.isEnabled())
+        self.assertNotIn('speakers', self.window.polling._observed)
+        self.assertIn('speakers', self.window.polling.periodic_groups())
+        self.assertNotIn('main', self.window.polling.periodic_groups())
+
+    def test_speaker_command_verification_is_fresh_without_duplicate_read(self):
+        self.discover()
+        self.window.config['Host'] = '127.0.0.1'
+        self.window._polling_initialized = True
+        target = (False, True)
+        with patch.object(self.window.api, 'set_speakers', return_value=target), \
+             patch.object(self.window.api, 'get_speaker_state') as speakers, \
+             patch.object(self.window, 'poll_status') as poll:
+            self.window.select_speakers(self.index(target))
+            deadline = time.monotonic() + 2
+            while self.window.action_running and time.monotonic() < deadline:
+                QTest.qWait(10)
+            self.assertFalse(self.window.action_running)
+            self.assertEqual(self.window._speaker_state, target)
+            self.assertNotIn('speakers', self.window.polling.periodic_groups())
+            poll.assert_called_once_with(groups={'main'})
+            speakers.assert_not_called()
 
     def test_input_favorites_are_below_combo_and_window_grows_to_fit(self):
         window = self.window

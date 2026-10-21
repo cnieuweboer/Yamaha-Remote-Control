@@ -437,7 +437,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.21.3"
+__version__ = "2026.10.21.4"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -1833,8 +1833,8 @@ class PollingCoordinator(QObject):
         super().__init__(window)
         self.window = window
         self.paused = False
-        self.pending = False
-        self.deadline = None
+        self._scheduled = {}
+        self._observed = {}
         self.periodic = QTimer(self)
         self.periodic.timeout.connect(self._periodic_due)
         self.refresh = QTimer(self)
@@ -1857,7 +1857,9 @@ class PollingCoordinator(QObject):
         return w.poll_running or w.action_running or w._calibration_operation
 
     def update(self, refresh=False):
-        self.periodic.setInterval(250 if self.window.calibration_active else POLL_INTERVAL_MS)
+        interval = 250 if self.window.calibration_active else POLL_INTERVAL_MS
+        if self.periodic.interval() != interval:
+            self.periodic.setInterval(interval)
         if not self.allowed():
             self.periodic.stop()
             self.refresh.stop()
@@ -1869,40 +1871,78 @@ class PollingCoordinator(QObject):
         elif self.pending:
             self._arm()
 
-    def request(self, delay_ms=0):
+    GROUPS = frozenset(("main", "speakers"))
+    FRESHNESS_SECONDS = POLL_INTERVAL_MS / 2000  # Half the normal interval.
+
+    @property
+    def pending(self):
+        return bool(self._scheduled)
+
+    def invalidate(self, groups=None):
+        for group in self.GROUPS if groups is None else groups:
+            self._observed.pop(group, None)
+
+    def observed(self, group, observed_at):
+        self._observed[group] = max(self._observed.get(group, 0), observed_at)
+
+    def periodic_groups(self):
+        if self.window.calibration_active:
+            return self.GROUPS
+        now = time.monotonic()
+        groups = {group for group in self.GROUPS if group not in self._scheduled
+                  and now - self._observed.get(group, -math.inf) >= self.FRESHNESS_SECONDS}
+        if not self.window._speaker_outputs or self.window._speaker_discovery_running:
+            groups.discard("speakers")
+        return frozenset(groups)
+
+    def request(self, delay_ms=0, groups=None):
         deadline = time.monotonic() + max(0, delay_ms) / 1000
-        self.deadline = min(self.deadline, deadline) if self.pending else deadline
-        self.pending = True
+        for group in self.GROUPS if groups is None else groups:
+            self._observed.pop(group, None)
+            self._scheduled[group] = min(self._scheduled.get(group, deadline), deadline)
         if delay_ms <= 0:
             self._dispatch()
         else:
             self._arm()
 
+    def _ready_groups(self):
+        return {group for group in self._scheduled
+                if group != "speakers" or not self.window._speaker_discovery_running}
+
     def _arm(self):
-        if self.allowed() and not self.busy():
-            self.refresh.start(max(0, math.ceil((self.deadline - time.monotonic()) * 1000)))
+        self.refresh.stop()
+        groups = self._ready_groups()
+        if groups and self.allowed() and not self.busy():
+            deadline = min(self._scheduled[group] for group in groups)
+            self.refresh.start(max(0, math.ceil((deadline - time.monotonic()) * 1000)))
 
     def _dispatch(self):
-        if not self.pending or not self.allowed() or self.busy():
+        if not self.allowed() or self.busy():
             return
-        self.pending = False
-        self.deadline = None
-        self.window.poll_status()
+        now = time.monotonic()
+        groups = {group for group in self._ready_groups() if self._scheduled[group] <= now}
+        for group in groups:
+            del self._scheduled[group]
+        if groups:
+            if groups == self.GROUPS:
+                self.window.poll_status()
+            else:
+                self.window.poll_status(groups=groups)
+        self._arm()
 
     def _periodic_due(self):
-        # A cycle already running satisfies the periodic tick. A delayed
-        # command refresh keeps its settling delay instead of being preempted.
-        if not self.busy() and not self.pending:
-            self.request()
+        # Keep the fixed timer. Pending/fresh groups do not defer other reads.
+        if self.allowed() and not self.busy():
+            groups = self.periodic_groups()
+            if groups:
+                self.window.poll_status(groups=groups)
 
     def finished(self):
-        if self.pending:
-            self._arm()
+        self._arm()
 
     def pause(self):
         self.paused = True
-        self.pending = False
-        self.deadline = None
+        self._scheduled.clear()
         self.periodic.stop()
         self.refresh.stop()
 
@@ -2334,13 +2374,17 @@ class YamahaRemote(QWidget):
         worker.signals.finished.connect(finished)
         self.pool.start(worker)
 
-    def run_action(self, action, *, background=False, batch_volume=False, on_result=None, on_error=None):
+    def run_action(self, action, *, background=False, batch_volume=False, on_result=None, on_error=None,
+                   refresh_groups=None):
         if self._shutting_down or self.calibration_active:
             return False
 
         if self.action_running or not self.connected:
             return False
 
+        groups = self.polling.GROUPS if refresh_groups is None else frozenset(refresh_groups)
+        # action_running reserves the serialized device worker immediately.
+        self.polling.invalidate(groups)
         self.action_running = True
 
         def done(result):
@@ -2350,7 +2394,7 @@ class YamahaRemote(QWidget):
             if batch_volume:
                 self._volume_batch_count += 1
             if not batch_volume or not self._continue_volume_batch():
-                self._request_poll()
+                self._request_poll(groups=groups)
             self.polling.finished()
             self._schedule_hotkey_drain()
 
@@ -2360,7 +2404,7 @@ class YamahaRemote(QWidget):
                 on_error(error)
             else:
                 self.handle_request_error(error, background=background, command=True)
-            self._request_poll()
+            self._request_poll(groups=groups)
             self.polling.finished()
             self._schedule_hotkey_drain()
 
@@ -2514,10 +2558,15 @@ class YamahaRemote(QWidget):
         self.run_worker(
             query, on_result=done,
             on_error=self._speaker_read_failed,
-            on_finished=lambda: setattr(self, "_speaker_discovery_running", False),
+            on_finished=self._speaker_discovery_finished,
         )
 
+    def _speaker_discovery_finished(self):
+        self._speaker_discovery_running = False
+        self.polling.finished()
+
     def _speaker_read_failed(self, error):
+        self.polling.invalidate({"speakers"})
         record_unexpected_exception(error, "Speaker status", background=True)
         self._speaker_state = None
         self._speaker_state_at = None
@@ -2528,6 +2577,7 @@ class YamahaRemote(QWidget):
     def _accept_speaker_state(self, state, observed_at=None):
         self._speaker_state = state
         self._speaker_state_at = time.monotonic() if observed_at is None else observed_at
+        self.polling.observed("speakers", self._speaker_state_at)
         if self._speaker_target is not None:
             if state == self._speaker_target:
                 self._speaker_target = None
@@ -2552,18 +2602,23 @@ class YamahaRemote(QWidget):
         if not isinstance(target, tuple) or self.calibration_active:
             self._update_speaker_ui()
             return
-        def done(state):
+        def done(result):
+            state, observed_at = result
             self._speaker_state = state
-            self._speaker_state_at = time.monotonic()
+            self._speaker_state_at = observed_at
+            self.polling.observed("speakers", observed_at)
             self._speaker_grace_deadline = time.monotonic() + SPEAKER_STATUS_GRACE_SECONDS
             self._update_speaker_ui()
         def failed(error):
+            self.polling.invalidate({"speakers"})
             self._speaker_target = None
             self._speaker_state = None
             self._update_speaker_ui()
             self.handle_request_error(error, command=True)
-        if self.run_action(lambda: self.api.set_speakers(target, self._speaker_outputs),
-                           on_result=done, on_error=failed):
+        def change():
+            state = self.api.set_speakers(target, self._speaker_outputs)
+            return state, time.monotonic()
+        if self.run_action(change, on_result=done, on_error=failed, refresh_groups={"main"}):
             self._speaker_target = target
             self._speaker_grace_deadline = None
         self._update_speaker_ui()
@@ -2579,22 +2634,25 @@ class YamahaRemote(QWidget):
         if self.startup_status_timer.isActive():
             self.startup_status_timer.stop()
 
-    def poll_status(self):
+    def poll_status(self, groups=None):
         if not self._should_poll():
             return
 
         if self.polling.busy():
             return
 
+        groups = self.polling.GROUPS if groups is None else frozenset(groups)
         self.poll_running = True
 
         speaker_state = speaker_error = speaker_observed_at = None
         outputs = self._speaker_outputs
+        cached_status = self.last_status
         def query():
             nonlocal speaker_state, speaker_error, speaker_observed_at
-            status = self.api.get_status()
-            observed_at = time.monotonic()
-            if outputs and status.get("power") == "on":
+            read_main = "main" in groups or cached_status is None
+            status = self.api.get_status() if read_main else cached_status
+            observed_at = time.monotonic() if read_main else None
+            if "speakers" in groups and outputs and status.get("power") == "on":
                 try:
                     speaker_state = self.api.get_speaker_state(outputs)
                     speaker_observed_at = time.monotonic()
@@ -2605,15 +2663,17 @@ class YamahaRemote(QWidget):
         def done(result):
             status, observed_at = result
             self.poll_running = False
-            self.clear_startup_status()
-            self.connected = True
-            self.power_button.setToolTip("")
-            self.last_status = status
-            self._volume_batch_count = 0
-            self._status_sequence += 1
-            self._last_status_at = observed_at
-            self._publish_hotkey_state()
-            self.show_cached_status()
+            if observed_at is not None:
+                self.clear_startup_status()
+                self.connected = True
+                self.power_button.setToolTip("")
+                self.last_status = status
+                self._volume_batch_count = 0
+                self._status_sequence += 1
+                self._last_status_at = observed_at
+                self._publish_hotkey_state()
+                self.show_cached_status()
+                self.polling.observed("main", observed_at)
             if speaker_error is not None:
                 self._speaker_read_failed(speaker_error)
             elif speaker_state is not None:
@@ -2639,8 +2699,8 @@ class YamahaRemote(QWidget):
     def _should_poll(self):
         return self.polling.allowed()
 
-    def _request_poll(self, delay_ms=0):
-        self.polling.request(delay_ms)
+    def _request_poll(self, delay_ms=0, groups=None):
+        self.polling.request(delay_ms, groups)
 
     def _update_polling_state(self, refresh=False):
         if hasattr(self, "polling"):
@@ -2696,6 +2756,7 @@ class YamahaRemote(QWidget):
         QMessageBox.warning(self, "Yamaha Remote", message)
 
     def set_offline(self):
+        self.polling.invalidate()
         self.clear_startup_status()
         self.connected = False
         self.last_status = None
@@ -2710,6 +2771,7 @@ class YamahaRemote(QWidget):
         self.set_controls_enabled(False)
 
     def set_error_status(self):
+        self.polling.invalidate()
         self.clear_startup_status()
         self.connected = False
         self.last_status = None
@@ -2794,7 +2856,7 @@ class YamahaRemote(QWidget):
         enabled = not bool(self.last_status.get("mute"))
 
         if self.run_action(
-            lambda: self.api.set_mute(enabled), background=background
+            lambda: self.api.set_mute(enabled), background=background, refresh_groups={"main"}
         ):
             self.last_status["mute"] = enabled
             self.show_cached_status()
@@ -2809,7 +2871,7 @@ class YamahaRemote(QWidget):
             else self.api.volume_up
         )
 
-        self.run_action(action, background=background, batch_volume=batch_volume)
+        self.run_action(action, background=background, batch_volume=batch_volume, refresh_groups={"main"})
 
     def select_input(self, index):
         if index < 0:
@@ -2987,7 +3049,7 @@ class YamahaRemote(QWidget):
             ))
             command = None if refresh else self._pending_hotkeys.popleft()
         if refresh:
-            self._request_poll()
+            self._request_poll(groups={"main"})
             return
         if isinstance(command, tuple):
             command, expected_input = command

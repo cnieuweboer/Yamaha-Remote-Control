@@ -4,6 +4,8 @@ Release identifiers below come from the corresponding commits. Some releases upd
 
 ## 2026-10-21
 
+- Yamaha Remote 2026.10.21.4 — Keep periodic polling on its fixed cadence and skip main or speaker status while its refresh is pending or its response is less than one second old. Volume/mute follow-ups refresh main status only; verified speaker responses also count as fresh. Failed reads remain retryable, speaker-only updates do not extend main/hotkey freshness, and explicit follow-ups/calibration bypass freshness.
+
 - Yamaha Remote 2026.10.21.3 — Add a local polling coordinator for periodic cadence, immediate/delayed coalesced refreshes, visibility/global-hotkey/IPC-client eligibility, and pause/resume. Defer requested refreshes behind active commands, status polls, or calibration operations while preserving volume-batch freshness limits and combined status reads.
 
 - Yamaha Remote 2026.10.21.2 — Share one successful system/getFeatures response between input and speaker discovery for each API instance. Retry failed/malformed capability responses; keep name and speaker-state reads separate.

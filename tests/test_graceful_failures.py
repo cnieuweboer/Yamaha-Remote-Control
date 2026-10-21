@@ -18,8 +18,8 @@ class CommandErrorTests(unittest.TestCase):
             _last_status_at=123.0, action_running=False, _shutting_down=False, calibration_active=False,
             power_button=SimpleNamespace(setToolTip=self.tooltips.append), show_error=Mock(),
             poll_status=Mock(), _schedule_hotkey_drain=Mock())
-        window._request_poll = window.poll_status
-        window.polling = SimpleNamespace(finished=Mock())
+        window._request_poll = lambda delay_ms=0, groups=None: window.poll_status()
+        window.polling = SimpleNamespace(finished=Mock(), invalidate=Mock(), GROUPS={'main', 'speakers'})
         def invalidate():
             window.connected = False
             window.last_status = None
