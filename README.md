@@ -49,7 +49,7 @@ Speaker selection updates immediately while the amplifier applies and confirms t
   "VolumeDb": true,
   "VolumeDbAtZero": -97.0,
   "VolumeDbStepSize": 0.5,
-  "GlobalVolumeHotkeys": false,
+  "GlobalShortcuts": {"VolumeUp": [], "VolumeDown": [], "Mute": []},
   "DiagnosticsEnabled": false,
   "SortByName": false,
   "Inputs": {},
@@ -64,7 +64,7 @@ Speaker selection updates immediately while the amplifier applies and confirms t
 - `VolumeDb` — display volume in dB instead of the API volume value.
 - `VolumeDbAtZero` — dB value corresponding to volume `0`. Required when `VolumeDb` is `true`.
 - `VolumeDbStepSize` — dB change corresponding to one volume step. Required when `VolumeDb` is `true` and must be greater than `0`.
-- `GlobalVolumeHotkeys` — `false` by default. On Windows, set to `true` to control the amplifier with Volume Up, Volume Down, and Mute even when another app is focused. Focused bindings are configured under `Shortcuts`; global control still uses the three physical volume media keys in this release.
+- `GlobalShortcuts` — Windows global bindings for `VolumeUp`, `VolumeDown`, and `Mute`. Empty lists disable them; focused bindings remain independent under `Shortcuts`.
 - `Shortcuts` — focused action-to-key lists; see the keyboard shortcut section below.
 - `DiagnosticsEnabled` — `false` by default. Set to `true` to append unexpected errors and crash diagnostics to `YamahaRemote-crash.log` beside the script. Logs contain the app version, exception types, and stack locations; exception messages, source lines, request data, and local variable values are omitted. If the log cannot be opened or written, the app continues without logging.
 - `SortByName` — `false` (default) keeps favorites and dropdown entries in JSON insertion order; `true` sorts them alphabetically by `NameOverride`, falling back to `Name`, ignoring case.
@@ -103,7 +103,9 @@ Edit `Shortcuts` to replace focused keyboard bindings; each action accepts a lis
 
 Names use [Qt portable shortcut notation](https://doc.qt.io/qt-6/qkeysequence.html#detailed-description). See the example JSON for all actions and [key-name examples and behavior](IMPLEMENTATION.md#configurable-focused-shortcuts) for media/numpad keys.
 
-By default on Windows, Volume Up, Volume Down, and Mute control the amplifier while this window is focused; enable `GlobalVolumeHotkeys` to use them from other apps or the system tray. When the amplifier is off or unavailable, new presses retain their normal behavior instead of waking it.
+By default, volume keys control the amplifier while this window is focused. To use them globally on Windows, set `GlobalShortcuts` to `{"VolumeUp": ["Volume Up"], "VolumeDown": ["Volume Down"], "Mute": ["Volume Mute"]}`; `[]` or `""` disables each global action. Existing enabled global media keys are migrated automatically.
+
+Global bindings capture those keys in other apps while the amplifier is on and available. Avoid everyday typing keys such as `A`; prefer media keys or uncommon modified combinations. Priority is amplifier global bindings, then SMTC playback, then focused shortcuts.
 
 Changing or disabling a focused binding does not change the global media keys. Global control applies on every amplifier input, and other media keys keep their usual behavior. On macOS and Linux, volume shortcuts work only while the remote is focused.
 

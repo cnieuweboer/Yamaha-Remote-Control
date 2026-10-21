@@ -438,7 +438,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.21.8"
+__version__ = "2026.10.21.9"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -487,7 +487,7 @@ DEFAULT_CONFIG = {
     "VolumeDb": False,
     "VolumeDbAtZero": -97.0,
     "VolumeDbStepSize": 0.5,
-    "GlobalVolumeHotkeys": False,
+    "GlobalShortcuts": {"VolumeUp": [], "VolumeDown": [], "Mute": []},
     "DiagnosticsEnabled": False,
     "SortByName": False,
     "DropdownAnimationWorkaround": sys.platform == "win32",
@@ -498,7 +498,7 @@ DEFAULT_CONFIG = {
 
 
 BOOLEAN_CONFIG_KEYS = (
-    "GlobalVolumeHotkeys", "DiagnosticsEnabled", "SortByName", "DarkMode", "Mica",
+    "DiagnosticsEnabled", "SortByName", "DarkMode", "Mica",
     "SystemTray", "CloseToTray", "VolumeDb", "DropdownAnimationWorkaround",
 )
 
@@ -662,27 +662,28 @@ def _ordered_entries(entries, sort_by_name):
     return items
 
 
-def _validate_shortcuts(raw):
+def _validate_shortcuts(raw, *, defaults=None, section="Shortcuts"):
+    defaults = DEFAULT_SHORTCUTS if defaults is None else defaults
     if not isinstance(raw, dict):
-        raise ConfigError('"Shortcuts" must be an object.')
-    unknown = set(raw) - set(DEFAULT_SHORTCUTS)
+        raise ConfigError(f'"{section}" must be an object.')
+    unknown = set(raw) - set(defaults)
     if unknown:
         raise ConfigError('Unknown shortcut action(s): ' + ', '.join(sorted(unknown)) + '.')
     normalized, owners = {}, {}
-    for action, defaults in DEFAULT_SHORTCUTS.items():
-        bindings = raw.get(action, defaults)
+    for action, fallback in defaults.items():
+        bindings = raw.get(action, fallback)
         if bindings == "":
             bindings = []
         if not isinstance(bindings, list):
-            raise ConfigError(f'Shortcuts.{action} must be a list of key strings, or empty to disable.')
+            raise ConfigError(f'{section}.{action} must be a list of key strings, or empty to disable.')
         normalized[action] = []
         for text in bindings:
             if not isinstance(text, str) or not text.strip():
-                raise ConfigError(f'Shortcuts.{action} contains an empty or invalid key.')
+                raise ConfigError(f'{section}.{action} contains an empty or invalid key.')
             sequence = QKeySequence.fromString(text.strip(), QKeySequence.PortableText)
             if (sequence.count() != 1 or sequence[0].key() in (Qt.Key_unknown, 0)
                     or not sequence.toString(QKeySequence.PortableText)):
-                raise ConfigError(f'Shortcuts.{action}: invalid single-key combination {text!r}.')
+                raise ConfigError(f'{section}.{action}: invalid single-key combination {text!r}.')
             code = sequence[0].toCombined()
             canonical = sequence.toString(QKeySequence.PortableText)
             if code in owners:
@@ -693,10 +694,10 @@ def _validate_shortcuts(raw):
     return normalized
 
 
-def _compile_shortcuts(config):
+def _compile_shortcuts(config, section="Shortcuts"):
     return {QKeySequence.fromString(text, QKeySequence.PortableText)[0].toCombined():
             SHORTCUT_ACTIONS[action]
-            for action, bindings in config["Shortcuts"].items() for text in bindings}
+            for action, bindings in config[section].items() for text in bindings}
 
 
 def _shortcut_code(event):
@@ -718,7 +719,12 @@ def _shortcut_tip(config, command):
     action = next((name for name, value in SHORTCUT_ACTIONS.items() if value == command), None)
     labels = [QKeySequence.fromString(text, QKeySequence.PortableText).toString(QKeySequence.NativeText)
               for text in config["Shortcuts"].get(action, [])]
-    return "Shortcut: " + " / ".join(labels) if labels else ""
+    lines = ["Shortcut: " + " / ".join(labels)] if labels else []
+    global_labels = [QKeySequence.fromString(text, QKeySequence.PortableText).toString(QKeySequence.NativeText)
+                     for text in config.get("GlobalShortcuts", {}).get(action, [])]
+    if global_labels:
+        lines.append("Global shortcut: " + " / ".join(global_labels))
+    return "\n".join(lines)
 
 
 def _default_config_copy():
@@ -747,6 +753,11 @@ def validate_config(raw_config, *, allow_incomplete=False):
             "The configuration root must be a JSON object."
         )
 
+    # Retired toggle is removed when the file is next saved; bindings are authoritative.
+    raw_config = dict(raw_config)
+    legacy_global = raw_config.pop("GlobalVolumeHotkeys", None)
+    if "GlobalShortcuts" not in raw_config and legacy_global is True:
+        raw_config["GlobalShortcuts"] = copy.deepcopy(DEFAULT_SHORTCUTS)
     unknown = set(raw_config) - set(DEFAULT_CONFIG)
     if unknown:
         raise ConfigError("Unknown configuration setting(s): " + ", ".join(sorted(unknown)) + ".")
@@ -754,6 +765,16 @@ def validate_config(raw_config, *, allow_incomplete=False):
     config = _default_config_copy()
     config.update(raw_config)
     config["Shortcuts"] = _validate_shortcuts(config["Shortcuts"])
+    config["GlobalShortcuts"] = _validate_shortcuts(
+        config["GlobalShortcuts"], defaults=DEFAULT_CONFIG["GlobalShortcuts"], section="GlobalShortcuts")
+    if sum(map(len, config["GlobalShortcuts"].values())) > 128:
+        raise ConfigError("At most 128 global shortcuts can be configured.")
+    native_owners = set()
+    for code in _compile_shortcuts(config, "GlobalShortcuts"):
+        native = _native_binding(code)
+        if native in native_owners:
+            raise ConfigError("Global shortcuts resolve to the same physical key combination.")
+        native_owners.add(native)
 
     config["Host"] = _validate_host(config["Host"])
     for key in BOOLEAN_CONFIG_KEYS:
@@ -805,9 +826,13 @@ def load_config():
         ) from ex
 
     config = validate_config(raw_config, allow_incomplete=True)
-    if "Shortcuts" not in raw_config or set(DEFAULT_SHORTCUTS) - set(raw_config["Shortcuts"]):
+    if ("Shortcuts" not in raw_config or set(DEFAULT_SHORTCUTS) - set(raw_config["Shortcuts"])
+            or "GlobalShortcuts" not in raw_config or "GlobalVolumeHotkeys" in raw_config
+            or set(DEFAULT_CONFIG["GlobalShortcuts"]) - set(raw_config["GlobalShortcuts"])):
         updated = dict(raw_config)
         updated["Shortcuts"] = config["Shortcuts"]
+        updated["GlobalShortcuts"] = config["GlobalShortcuts"]
+        updated.pop("GlobalVolumeHotkeys", None)
         save_config(updated, expected_digest=hashlib.sha256(content).digest())
     return config
 
@@ -1061,7 +1086,7 @@ def get_app_icon():
     return QIcon()
 
 
-# Only these three media keys belong to the amplifier remote.
+# Volume actions are independent of their configurable physical bindings.
 _VOLUME_KEYS = {0xAF: "volume_up", 0xAE: "volume_down", 0xAD: "mute"}
 _RETAINED_VOLUME_HOOKS = []
 
@@ -1069,6 +1094,64 @@ _RETAINED_VOLUME_HOOKS = []
 
 _NATIVE_QT_VOLUME_KEYS = {0xAF: Qt.Key_VolumeUp.value, 0xAE: Qt.Key_VolumeDown.value,
                           0xAD: Qt.Key_VolumeMute.value}
+
+
+_NATIVE_SPECIAL_KEYS = {
+    Qt.Key_Backspace.value: 0x08, Qt.Key_Tab.value: 0x09, Qt.Key_Return.value: 0x0D,
+    Qt.Key_Enter.value: 0x0D, Qt.Key_Escape.value: 0x1B, Qt.Key_Space.value: 0x20,
+    Qt.Key_PageUp.value: 0x21, Qt.Key_PageDown.value: 0x22, Qt.Key_End.value: 0x23,
+    Qt.Key_Home.value: 0x24, Qt.Key_Left.value: 0x25, Qt.Key_Up.value: 0x26,
+    Qt.Key_Right.value: 0x27, Qt.Key_Down.value: 0x28, Qt.Key_Insert.value: 0x2D,
+    Qt.Key_Delete.value: 0x2E, Qt.Key_VolumeMute.value: 0xAD,
+    Qt.Key_VolumeDown.value: 0xAE, Qt.Key_VolumeUp.value: 0xAF,
+    Qt.Key_MediaNext.value: 0xB0, Qt.Key_MediaPrevious.value: 0xB1,
+    Qt.Key_MediaStop.value: 0xB2, Qt.Key_MediaTogglePlayPause.value: 0xB3,
+    **{Qt.Key_F1.value + i: 0x70 + i for i in range(24)},
+}
+
+
+def _native_binding(code):
+    key, modifiers = code & 0x01FFFFFF, code & ~0x01FFFFFF
+    if modifiers & ~int((Qt.ShiftModifier | Qt.ControlModifier | Qt.AltModifier |
+                         Qt.MetaModifier | Qt.KeypadModifier).value):
+        raise ConfigError("Unsupported global shortcut modifier.")
+    if key == Qt.Key_Enter.value:
+        return 0x0D, modifiers | Qt.KeypadModifier.value
+    if modifiers & Qt.KeypadModifier.value:
+        keypad = {ord(str(i)): 0x60 + i for i in range(10)}
+        keypad.update({ord('+'): 0x6B, ord('-'): 0x6D, ord('*'): 0x6A,
+                       ord('/'): 0x6F, ord('.'): 0x6E})
+        if key in keypad:
+            return keypad[key], modifiers & ~Qt.KeypadModifier.value
+        if key in (Qt.Key_Enter.value, Qt.Key_Left.value, Qt.Key_Right.value,
+                   Qt.Key_Up.value, Qt.Key_Down.value, Qt.Key_Home.value, Qt.Key_End.value,
+                   Qt.Key_PageUp.value, Qt.Key_PageDown.value, Qt.Key_Insert.value, Qt.Key_Delete.value):
+            return _NATIVE_SPECIAL_KEYS[key], modifiers
+        raise ConfigError("Unsupported global keypad shortcut.")
+    if key in _NATIVE_SPECIAL_KEYS:
+        return _NATIVE_SPECIAL_KEYS[key], modifiers
+    if ord('A') <= key <= ord('Z') or ord('0') <= key <= ord('9'):
+        return key, modifiers
+    if 0x21 <= key <= 0xFFFF:
+        if sys.platform != "win32":
+            return key, modifiers  # No global hook on this platform.
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.VkKeyScanW.argtypes = [ctypes.c_wchar]
+        user32.VkKeyScanW.restype = ctypes.c_short
+        value = user32.VkKeyScanW(chr(key))
+        if value != -1:
+            for bit, mask in ((1, Qt.ShiftModifier.value), (2, Qt.ControlModifier.value),
+                              (4, Qt.AltModifier.value)):
+                if (value >> 8) & bit:
+                    modifiers |= mask
+            return value & 255, modifiers
+    raise ConfigError("Unsupported global shortcut: " + QKeySequence(code).toString())
+
+
+def _native_event_modifiers(key, flags, modifiers):
+    if key == 0x0D and flags & 1 or key in range(0x21, 0x2F) and not flags & 1:
+        modifiers |= Qt.KeypadModifier.value
+    return modifiers
 
 
 def _native_shortcut_modifiers(user32):
@@ -1092,7 +1175,7 @@ class _VolumeKeyState:
         if key in self.pressed:
             owned = self.pressed[key]
             original = self.commands.get(key, command)
-            if owned and original not in ("mute", "PlayPause"):
+            if owned and (original[-1] if isinstance(original, tuple) else original) not in ("mute", "PlayPause"):
                 accept(original)
             return owned
         owned = bool(accept(command))
@@ -1201,7 +1284,7 @@ class _WindowsVolumeHook(QObject):
             # Do not seize keys that were already held when the app started.
             self._keys.clear()
             self._keys.pressed = {
-                key: False for key in _VOLUME_KEYS
+                key: False for key in range(1, 256)
                 if self._user32.GetAsyncKeyState(key) & 0x8000
             }
             self._callback = _HookProc(self._handle_key)
@@ -1245,9 +1328,9 @@ class _WindowsVolumeHook(QObject):
                 data = ctypes.cast(address, ctypes.POINTER(_LowLevelKey)).contents
                 key = data.vkCode
                 command = _VOLUME_KEYS.get(key)
-                if command is not None and self._resolve is not None:
+                if self._resolve is not None:
                     command = self._keys.commands.get(key) or self._resolve(
-                        key, _native_shortcut_modifiers(self._user32))
+                        key, _native_event_modifiers(key, data.flags, _native_shortcut_modifiers(self._user32)))
                 # Remappers can generate injected volume-key events. They are
                 # safe to handle too: this remote never synthesizes key events.
                 if command or key in self._keys.pressed:
@@ -1964,7 +2047,7 @@ class PollingCoordinator(QObject):
     def allowed(self):
         w = self.window
         background_control = bool(
-            w.config["GlobalVolumeHotkeys"] and w._native_volume_hook is not None
+            bool(w._global_bindings) and w._native_volume_hook is not None
             and w._native_volume_hook.installed)
         return bool(not self.paused and not w._shutting_down and w._polling_initialized
                     and not missing_config_settings(w.config)
@@ -2080,6 +2163,11 @@ class YamahaRemote(QWidget):
         super().__init__()
         self.config = config
         self._shortcut_bindings = _compile_shortcuts(config)
+        self._global_bindings = _compile_shortcuts(config, "GlobalShortcuts")
+        self._global_native_bindings = {}
+        for code, command in self._global_bindings.items():
+            native = _native_binding(code)
+            self._global_native_bindings[native] = command
         self.calibration_active = False
         self._calibration_key_blocked = False
         self.amplifier_server = None
@@ -2125,7 +2213,7 @@ class YamahaRemote(QWidget):
         self._pending_hotkeys = deque()
         self._hotkey_drain_scheduled = False
         self._hotkey_state_refresh_pending = False
-        self._hotkey_state = (False, False, 0, None, False)
+        self._hotkey_state = (False, 0, None, False)
         self._qt_volume_keys = _VolumeKeyState()
         self._native_volume_hook = None
 
@@ -2253,7 +2341,7 @@ class YamahaRemote(QWidget):
                 self._native_volume_hook.start()
             except Exception as error:
                 QTimer.singleShot(0, lambda error=error: self._native_hotkey_changed(False, error))
-        elif self.config["GlobalVolumeHotkeys"]:
+        elif bool(self._global_bindings):
             QTimer.singleShot(0, lambda: self.show_error(
                 "Global volume hotkeys are supported on Windows only. "
                 "Volume keys still work while this window is focused."
@@ -3033,8 +3121,9 @@ class YamahaRemote(QWidget):
                 "volume_unit": "dB" if self.config["VolumeDb"] else "raw",
                 "raw_max_volume": raw("max_volume"),
                 "mute": status.get("mute") if type(status.get("mute")) is bool else None,
-                "global_hotkeys_enabled": self.config["GlobalVolumeHotkeys"],
+                "global_hotkeys_enabled": bool(self._global_bindings),
                 "global_hotkeys_active": self.global_volume_hotkeys_active,
+                "global_shortcuts": self._active_global_codes(),
                 "calibration_active": self.calibration_active,
                 "valid_for_ms": valid_for if self.connected and not self._shutting_down else 0}
 
@@ -3073,13 +3162,20 @@ class YamahaRemote(QWidget):
             and time.monotonic() - self._last_status_at <= HOTKEY_STATE_MAX_AGE_SECONDS
         )
 
+    def _active_global_codes(self):
+        if not self.global_volume_hotkeys_active:
+            return []
+        return [code | Qt.KeypadModifier.value if code & 0x01FFFFFF == Qt.Key_Enter.value else code
+                for code in self._global_bindings]
+
     @property
     def global_volume_hotkeys_active(self):
         return bool(self.calibration_active or (
-            self.config["GlobalVolumeHotkeys"]
+            bool(self._global_bindings)
             and self._native_volume_hook is not None and self._native_volume_hook.installed
             and self._volume_hotkeys_eligible()
             and QApplication.activeModalWidget() is None
+            and QApplication.activePopupWidget() is None
         ))
 
     def _publish_hotkey_state(self):
@@ -3088,7 +3184,7 @@ class YamahaRemote(QWidget):
         if not hasattr(self, "_hotkey_lock"):
             return
         state = (
-            self._volume_hotkeys_eligible(), self.config["GlobalVolumeHotkeys"],
+            self._volume_hotkeys_eligible(),
             int(self.winId()) if sys.platform == "win32" and self.isVisible() and not self.isMinimized() else 0,
             self._last_status_at, (QApplication.activeModalWidget() is not None or QApplication.activePopupWidget() is not None),
         )
@@ -3107,24 +3203,30 @@ class YamahaRemote(QWidget):
             self._publish_hotkey_state()
 
     def _resolve_native_volume(self, key, modifiers):
-        # Global bindings remain the physical media keys until phase two.
-        if self._calibration_key_blocked or self._hotkey_state[1]:
+        if self._calibration_key_blocked:
             return _VOLUME_KEYS.get(key)
-        return self._shortcut_bindings.get(_NATIVE_QT_VOLUME_KEYS[key] | modifiers)
+        eligible, _, observed_at, blocked = self._hotkey_state
+        if (eligible and not blocked and observed_at is not None
+                and time.monotonic() - observed_at <= HOTKEY_STATE_MAX_AGE_SECONDS):
+            binding = self._global_native_bindings.get((key, modifiers))
+            if binding:
+                return ("global", binding)
+        # Only physical volume keys need a native focused fallback.
+        qt_key = _NATIVE_QT_VOLUME_KEYS.get(key)
+        return self._shortcut_bindings.get(qt_key | modifiers) if qt_key else None
 
     def _accept_native_hotkey(self, command, foreground):
         with self._hotkey_lock:
             if self._calibration_key_blocked:
                 return command in _VOLUME_KEYS.values()
-            eligible, global_mode, window, observed_at, blocked = self._hotkey_state
-            if (command not in _VOLUME_KEYS.values() or not eligible or blocked or observed_at is None
+            global_binding = isinstance(command, tuple)
+            action = command[-1] if global_binding else command
+            eligible, window, observed_at, blocked = self._hotkey_state
+            if (action not in _VOLUME_KEYS.values() or not eligible or blocked or observed_at is None
                     or time.monotonic() - observed_at > HOTKEY_STATE_MAX_AGE_SECONDS
-                    or (not global_mode and (not window or foreground != window))):
+                    or (not global_binding and (not window or foreground != window))):
                 return False
-            # Ownership depends on eligibility, not worker capacity. A wheel
-            # emits distinct presses; forwarding overflow would alter Windows
-            # volume while the rest of the same burst controls the amplifier.
-            self._enqueue_hotkey_locked(command)
+            self._enqueue_hotkey_locked(action)
             return True
 
     def _enqueue_hotkey_locked(self, command):

@@ -198,7 +198,7 @@ class HiddenPollingTests(unittest.TestCase):
     def test_hidden_polling_retains_global_hotkey_and_connected_client_behavior(self):
         window = SimpleNamespace(
             _shutting_down=False, _polling_initialized=True, calibration_active=False,
-            config={'Host': 'device.local', 'GlobalVolumeHotkeys': True},
+            config={'Host': 'device.local'}, _global_bindings={1: 'volume_up'},
             _native_volume_hook=SimpleNamespace(installed=True),
             amplifier_server=SimpleNamespace(clients={}),
             isVisible=lambda: False, isMinimized=lambda: False,
@@ -206,7 +206,7 @@ class HiddenPollingTests(unittest.TestCase):
         coordinator = SimpleNamespace(window=window, paused=False)
         poll = lambda w: REMOTE['PollingCoordinator'].allowed(coordinator)
         self.assertTrue(poll(window))
-        window.config['GlobalVolumeHotkeys'] = False
+        window._global_bindings = {}
         self.assertFalse(poll(window))
         window.amplifier_server.clients['tv'] = object()
         self.assertTrue(poll(window))

@@ -4,6 +4,8 @@ Release identifiers below come from the corresponding commits. Some releases upd
 
 ## 2026-10-21
 
+- Yamaha Remote 2026.10.21.9 — Replace the global enable toggle with independent configurable GlobalShortcuts for volume/mute. Preserve global settings on migration, validate native bindings before restart, keep bounded press ownership, and publish per-binding IPC ownership. Global bindings take priority over SMTC and focused shortcuts; retain hidden polling and offline/standby passthrough.
+
 - Yamaha Remote 2026.10.21.8 — Add configurable focused `Shortcuts` with readable Qt key strings, multiple bindings, explicit disabling, conflict validation, missing-default insertion, and generated button tooltips. Preserve native Windows volume suppression, press ownership/repeat rules, popup safeguards, and calibration key isolation. Global volume keys/IPC ownership remain unchanged for phase two.
 
 - Yamaha Remote 2026.10.21.7 — Elide long closed-combobox and favorite labels at the right edge, keeping the leading text. Keep favorite columns equal and prevent names from widening the layout. Truncation follows available pixel width; full names and action targets remain intact. Popup-list rendering is unchanged.

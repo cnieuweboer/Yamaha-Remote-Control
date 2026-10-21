@@ -216,7 +216,8 @@ class FreshnessTests(unittest.TestCase):
         remote = SimpleNamespace(last_status={'power': 'on', 'volume': 20, 'max_volume': 154,
                                              'input': 'tv', 'mute': False},
                                  _last_status_at=100.0, connected=True, _shutting_down=False,
-                                 config={'Host': 'amp', 'VolumeDb': False, 'GlobalVolumeHotkeys': False},
+                                 _global_bindings={}, _active_global_codes=lambda: [],
+                                 config={'Host': 'amp', 'VolumeDb': False, 'GlobalShortcuts': {}},
                                  api=SimpleNamespace(format_volume=str), global_volume_hotkeys_active=False,
                                  calibration_active=False)
         snapshot = REMOTE['YamahaRemote']._amplifier_snapshot

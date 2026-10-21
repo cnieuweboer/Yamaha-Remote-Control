@@ -26,6 +26,7 @@ class PollingTests(unittest.TestCase):
         self.w._polling_initialized = True
         self.w._native_volume_hook = None
         self.w.amplifier_server = None
+        self.w._global_bindings = {}
         self.w.config = dict(REMOTE['DEFAULT_CONFIG'], Host='192.168.1.2')
         self.w.poll_status = Mock()
         self.p = REMOTE['PollingCoordinator'](self.w)
@@ -93,14 +94,14 @@ class PollingTests(unittest.TestCase):
 
     def test_calibration_and_background_modes_allow_hidden_polling(self):
         self.w.hide()
-        self.w.config['GlobalVolumeHotkeys'] = False
+        self.w._global_bindings = {}
         self.assertFalse(self.p.allowed())
         self.w.calibration_active = True
         self.p.update()
         self.assertEqual(self.p.periodic.interval(), 250)
         self.assertTrue(self.p.allowed())
         self.w.calibration_active = False
-        self.w.config['GlobalVolumeHotkeys'] = True
+        self.w._global_bindings = {1: 'volume_up'}
         self.w._native_volume_hook = Mock(installed=True)
         self.assertTrue(self.p.allowed())
         self.w._native_volume_hook.installed = False
