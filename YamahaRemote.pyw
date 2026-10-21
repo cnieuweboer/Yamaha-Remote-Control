@@ -1,6 +1,6 @@
 import ctypes
 import copy
-from datetime import datetime
+from datetime import datetime, timezone
 import faulthandler
 import hashlib
 import ipaddress
@@ -19,7 +19,8 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import build_opener, ProxyHandler
-from PySide6.QtCore import QByteArray, QEasingCurve, QElapsedTimer, QRect, QEvent, QFileInfo, QFileSystemWatcher, QObject, QLockFile, QProcess, QRunnable, QStandardPaths, QThreadPool, QTimer, Qt, Signal
+from PySide6 import __version__ as PYSIDE_VERSION
+from PySide6.QtCore import qVersion, QByteArray, QEasingCurve, QElapsedTimer, QRect, QEvent, QFileInfo, QFileSystemWatcher, QObject, QLockFile, QProcess, QRunnable, QStandardPaths, QThreadPool, QTimer, Qt, Signal
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtGui import QAction, QKeySequence, QFont, QIcon, QPalette, QStyleHints
 from PySide6.QtWidgets import (
@@ -201,9 +202,11 @@ class AmplifierServer(QObject):
 class ActivationServer(QObject):
     """User-local window activation, separate from device commands and leases."""
 
-    def __init__(self, role, activate, parent=None):
+    def __init__(self, role, activate, parent=None, *, dump=None):
         super().__init__(parent)
         self.role, self.activate = role, activate
+        self.dump = dump
+        self.handled = set()
         self.name = ipc_server_name(role, channel="activation")
         self.clients = {}
         self.lock = QLockFile(str(Path(tempfile.gettempdir()) / (self.name + ".lock")))
@@ -231,6 +234,7 @@ class ActivationServer(QObject):
             socket.readyRead.connect(lambda socket=socket: self._read(socket))
             socket.disconnected.connect(lambda socket=socket: self._lost(socket))
             timer = QTimer(socket)
+            timer.setObjectName("request_deadline")
             timer.setSingleShot(True)
             timer.timeout.connect(lambda socket=socket: socket.abort())
             timer.start(1000)
@@ -242,18 +246,29 @@ class ActivationServer(QObject):
             messages = _ipc_frames(socket, self.clients[socket])
             if not messages:
                 return
-            if (not self.available or len(messages) != 1
-                    or messages[0] != {"version": 1, "type": "activate"}):
-                raise ValueError("Invalid activation request")
-            ok = bool(self.activate())
-            socket.write(_ipc_encode({"version": 1, "type": "activated", "ok": ok}))
-            socket.disconnectFromServer()
+            if not self.available or len(messages) != 1 or socket in self.handled:
+                raise ValueError("Invalid instance request")
+            self.handled.add(socket)
+            if messages[0] == {"version": 1, "type": "activate"}:
+                ok = bool(self.activate())
+                socket.write(_ipc_encode({"version": 1, "type": "activated", "ok": ok}))
+                socket.disconnectFromServer()
+            elif messages[0] == {"version": 1, "type": "dump_state"} and self.dump is not None:
+                socket.findChild(QTimer, "request_deadline").start(5000)
+                def completed(result):
+                    if socket in self.clients:
+                        socket.write(_ipc_encode(dict(result, version=1, type="state_dump")))
+                        socket.disconnectFromServer()
+                self.dump(completed)
+            else:
+                raise ValueError("Unsupported instance request")
         except (ValueError, UnicodeError, KeyError):
             socket.abort()
 
     def _lost(self, socket):
         if socket in self.clients:
             del self.clients[socket]
+            self.handled.discard(socket)
             socket.deleteLater()
 
     def close(self):
@@ -275,7 +290,7 @@ def _allow_foreground_activation(process_id):
             pass  # Window restoration still works if foreground permission is denied.
 
 
-def activate_existing_instance(role, timeout_seconds=1.5):
+def _request_existing_instance(role, request_type, timeout_seconds):
     """Bound startup retries and the complete handshake to one deadline."""
     socket = QLocalSocket()
     socket.setReadBufferSize(IPC_MAX_FRAME + 1)
@@ -304,23 +319,48 @@ def activate_existing_instance(role, timeout_seconds=1.5):
             socket.abort()
             time.sleep(min(0.05, remaining()))
         else:
-            return False
+            return None
         hello = receive("instance")
         if (not hello or hello.get("role") != role or type(hello.get("process_id")) is not int
                 or not 0 < hello["process_id"] <= 0xFFFFFFFF):
-            return False
-        _allow_foreground_activation(hello["process_id"])
-        payload = _ipc_encode({"version": 1, "type": "activate"})
+            return None
+        if request_type == "activate":
+            _allow_foreground_activation(hello["process_id"])
+        payload = _ipc_encode({"version": 1, "type": request_type})
         if socket.write(payload) != len(payload):
-            return False
+            return None
         if socket.bytesToWrite() and not socket.waitForBytesWritten(int(remaining() * 1000)):
-            return False
-        reply = receive("activated")
-        return bool(reply and reply.get("ok") is True)
+            return None
+        return receive("activated" if request_type == "activate" else "state_dump")
     except (ValueError, UnicodeError, OSError, TypeError):
-        return False
+        return None
     finally:
         socket.abort()
+
+
+
+def activate_existing_instance(role, timeout_seconds=1.5):
+    reply = _request_existing_instance(role, "activate", timeout_seconds)
+    return bool(reply and reply.get("ok") is True)
+
+
+def dump_existing_state(role):
+    reply = _request_existing_instance(role, "dump_state", 5.0)
+    if reply and reply.get("ok") is True and isinstance(reply.get("path"), str):
+        message = "Cached state saved to:\n" + reply["path"]
+        if reply.get("fallback"):
+            message += "\n(The script folder was unavailable; the app data folder was used.)"
+        ok = True
+    else:
+        error = reply.get("error", "unavailable") if reply else "unavailable"
+        message = ("No state dump was confirmed. Start the remote first, or wait until it is responsive."
+                   if error == "unavailable" else "Could not write the cached state dump (" + str(error) + ").")
+        ok = False
+    if sys.stdout is not None:
+        print(message)
+    else:
+        (QMessageBox.information if ok else QMessageBox.warning)(None, APP_NAME + " - State dump", message)
+    return 0 if ok else 1
 
 
 class CalibrationServer(QObject):
@@ -459,7 +499,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.21.11"
+__version__ = "2026.10.21.12"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -1824,6 +1864,131 @@ class YamahaApi:
 # ----------------------------
 
 
+# ----------------------------
+# Cached diagnostics (no device requests)
+# ----------------------------
+
+
+def _state_age(observed_at, now):
+    return round(max(0.0, now - observed_at), 3) if observed_at else None
+
+
+class RequestHistory:
+    """Bounded GUI-thread outcome summaries; never retain exceptions or payloads."""
+
+    def __init__(self):
+        self.groups = {}
+
+    def record(self, group, error=None):
+        if group not in ("status", "command", "apps", "inputs", "speakers", "background"):
+            group = "background"
+        outcome = "failure" if error is not None else "success"
+        record = self.groups.setdefault(group, {})
+        record[outcome] = {"at_utc": datetime.now(timezone.utc).isoformat(),
+                           "observed_at": time.monotonic()}
+        if error is not None:
+            record[outcome]["exception_type"] = type(error).__name__
+        record["latest"] = outcome
+
+    def snapshot(self, now):
+        result = copy.deepcopy(self.groups)
+        for record in result.values():
+            for outcome in ("success", "failure"):
+                if outcome in record:
+                    observed = record[outcome].pop("observed_at")
+                    record[outcome]["age_seconds"] = _state_age(observed, now)
+        return result
+
+
+def write_state_dump(snapshot, directories):
+    """Write a complete, exclusive report; fall back without overwriting files."""
+    payload = json.dumps(snapshot, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    filename = f"{Path(__file__).stem}-state-{stamp}-{os.urandom(4).hex()}.json"
+    last_error = None
+    for index, directory in enumerate(directories):
+        path = Path(directory) / filename
+        created = False
+        try:
+            Path(directory).mkdir(parents=True, exist_ok=True)
+            with path.open("x", encoding="utf-8") as stream:
+                created = True
+                stream.write(payload)
+            return {"ok": True, "path": str(path.resolve()), "fallback": index > 0}
+        except OSError as error:
+            last_error = error
+            if created:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+    raise last_error or OSError("No diagnostic output directory is available")
+
+
+class StateDumper(QObject):
+    """Capture on the GUI thread; one file write at a time on a separate pool."""
+
+    def __init__(self, parent, snapshot):
+        super().__init__(parent)
+        self.snapshot = snapshot
+        self.worker = None
+
+    def request(self, done):
+        if self.worker is not None:
+            done({"ok": False, "error": "busy"})
+            return
+        try:
+            snapshot = copy.deepcopy(self.snapshot())
+            directories = [CONFIG_PATH.parent]
+            fallback = QStandardPaths.writableLocation(QStandardPaths.AppLocalDataLocation)
+            if fallback:
+                directories.append(Path(fallback) / "diagnostics")
+            worker = Worker(lambda: write_state_dump(snapshot, directories))
+        except Exception as error:
+            done({"ok": False, "error": type(error).__name__})
+            return
+        self.worker = worker
+        worker.signals.result.connect(done)
+        worker.signals.error.connect(lambda error: done({"ok": False, "error": type(error).__name__}))
+        worker.signals.finished.connect(self._finished)
+        QThreadPool.globalInstance().start(worker)
+
+    def _finished(self):
+        self.worker = None
+
+
+def _cached_common(window, role, now):
+    polling = window.polling
+    scheduled = {}
+    for group, value in polling._scheduled.items():
+        deadline = value[0] if isinstance(value, tuple) else value
+        scheduled[group] = round(max(0.0, deadline - now), 3)
+    return {
+        "report_format_version": 1, "mode": "cached", "fresh_queries_performed": False,
+        "captured_at_utc": datetime.now(timezone.utc).isoformat(),
+        "app": {"name": APP_NAME, "version": __version__, "role": role,
+                "python_version": sys.version.split()[0], "qt_version": qVersion(),
+                "pyside_version": PYSIDE_VERSION, "platform": sys.platform},
+        "window": {"visible": window.isVisible(), "minimized": window.isMinimized(),
+                   "active": window.isActiveWindow(), "tray_available": window.tray is not None},
+        "lifecycle": {"shutting_down": window._shutting_down, "restart_failed": window._restart_failed,
+                      "invalid_config_edit": window._invalid_config_digest is not None,
+                      "missing_config_settings": missing_config_settings(window.config)},
+        "calibration": {"active": window.calibration_active, "operation_running": window._calibration_operation},
+        "polling": {"paused": polling.paused, "periodic_active": polling.periodic.isActive(),
+                    "periodic_interval_ms": polling.periodic.interval(),
+                    "poll_running": window.poll_running, "scheduled_in_seconds": scheduled,
+                    "observed_age_seconds": {key: _state_age(value, now) for key, value in polling._observed.items()},
+                    "active_device_workers": len(window._workers)},
+        "requests": window.request_history.snapshot(now),
+        "discovery": {"paused": window.discovery.paused,
+                      "last_inventory_age_seconds": {key: _state_age(value, now) for key, value in window.discovery.checked.items()},
+                      "pending_removal_counts": {key: len(value) for key, value in window.discovery.pending.items()}},
+        "privacy": {"omitted": ["credentials", "device_addresses", "text_input", "exception_messages",
+                                 "request_payloads", "app_and_input_inventories", "configuration_file"]},
+    }
+
+
 class WorkerSignals(QObject):
     result = Signal(object)
     error = Signal(object)
@@ -2320,6 +2485,8 @@ class YamahaRemote(QWidget):
         # Keep receiver requests serialized, including status refreshes.
         self.pool.setMaxThreadCount(1)
         self._workers = set()
+        self.request_history = RequestHistory()
+        self.state_dumper = StateDumper(self, self._cached_state)
         self.poll_running = False
         self.initialized = False
         self.tray = None
@@ -2700,7 +2867,7 @@ class YamahaRemote(QWidget):
     # Background work
     # ----------------------------
 
-    def run_worker(self, function, on_result=None, on_error=None, on_finished=None):
+    def run_worker(self, function, on_result=None, on_error=None, on_finished=None, *, request_group="background"):
         if self._shutting_down or missing_config_settings(self.config):
             return
         worker = Worker(function)
@@ -2708,11 +2875,14 @@ class YamahaRemote(QWidget):
         generation = self._worker_generation
 
         def deliver_result(result):
-            if not self._shutting_down and generation == self._worker_generation and on_result:
-                on_result(result)
+            if not self._shutting_down and generation == self._worker_generation:
+                self.request_history.record(request_group)
+                if on_result:
+                    on_result(result)
 
         def deliver_error(error):
             if not self._shutting_down and generation == self._worker_generation:
+                self.request_history.record(request_group, error)
                 (on_error or self.handle_request_error)(error)
 
         def finished():
@@ -2759,7 +2929,7 @@ class YamahaRemote(QWidget):
             self.polling.finished()
             self._schedule_hotkey_drain()
 
-        self.run_worker(action, on_result=done, on_error=failed)
+        self.run_worker(action, on_result=done, on_error=failed, request_group="command")
         return True
 
     def _continue_volume_batch(self):
@@ -2863,7 +3033,7 @@ class YamahaRemote(QWidget):
             self._input_discovery_running = False
             self.polling.finished()
         accepted = self.run_worker(query, on_result=done,
-            on_error=lambda error: self.handle_request_error(error, background=True), on_finished=finished)
+            on_error=lambda error: self.handle_request_error(error, background=True), on_finished=finished, request_group="inputs")
         if accepted is False:
             self._input_discovery_running = False
 
@@ -2911,6 +3081,7 @@ class YamahaRemote(QWidget):
         self.polling.finished()
 
     def _speaker_read_failed(self, error):
+        self.request_history.record("speakers", error)
         self.polling.invalidate({"speakers"})
         record_unexpected_exception(error, "Speaker status", background=True)
         self._speaker_state = None
@@ -2920,6 +3091,7 @@ class YamahaRemote(QWidget):
         self.speaker_combo.setEnabled(False)
 
     def _accept_speaker_state(self, state, observed_at=None):
+        self.request_history.record("speakers")
         self._speaker_state = state
         self._speaker_state_at = time.monotonic() if observed_at is None else observed_at
         self.polling.observed("speakers", self._speaker_state_at)
@@ -3040,7 +3212,7 @@ class YamahaRemote(QWidget):
             self.handle_request_error(error, background=True)
 
         self.run_worker(query, on_result=done, on_error=failed,
-                        on_finished=self.polling.finished)
+                        on_finished=self.polling.finished, request_group="status")
 
     def _request_poll(self, delay_ms=0, groups=None):
         self.polling.request(delay_ms, groups)
@@ -3636,11 +3808,42 @@ class YamahaRemote(QWidget):
     # Tray and shutdown lifecycle
     # ----------------------------
 
+    def _cached_state(self):
+        now = time.monotonic()
+        report = _cached_common(self, "amplifier", now)
+        status = self.last_status or {}
+        report["device"] = {"connected": self.connected,
+            "status_age_seconds": _state_age(self._last_status_at, now),
+            "state": {key: status.get(key) for key in ("power", "input", "volume", "max_volume", "mute")},
+            "speakers": {"available_outputs": list(self._speaker_outputs or ()), "observed": self._speaker_state,
+                         "target": self._speaker_target, "age_seconds": _state_age(self._speaker_state_at, now),
+                         "grace_remaining_seconds": max(0, (self._speaker_grace_deadline or now)-now)}}
+        with self._hotkey_lock:
+            pending = len(self._pending_hotkeys)
+            overrides = [{"window": window, "remaining_seconds": round(max(0, deadline-now),3),
+                          "binding_count": len(bindings)} for window, deadline, bindings in self._focused_tv_overrides]
+        report["hotkeys"] = {"focused_configured": copy.deepcopy(self.config["Shortcuts"]),
+            "global_configured": copy.deepcopy(self.config["GlobalShortcuts"]),
+            "global_active": self.global_volume_hotkeys_active, "active_global_bindings": self._active_global_codes(),
+            "eligible": self._volume_hotkeys_eligible(),
+            "native_hook_installed": bool(self._native_volume_hook and self._native_volume_hook.installed),
+            "pending_commands": pending, "drain_scheduled": self._hotkey_drain_scheduled,
+            "calibration_key_blocked": self._calibration_key_blocked, "focused_tv_overrides": overrides}
+        server = self.amplifier_server
+        report["ipc"] = {"server_available": bool(server and server.available),
+                         "connected_peers": len(server.clients) if server else 0,
+                         "focused_volume_contexts": len(server.focused_volume) if server else 0}
+        report["routing"] = {"volume_destination": "amplifier", "input": status.get("input"),
+                             "global_eligible": self._volume_hotkeys_eligible()}
+        report["volume_commands"] = {"action_running": self.action_running,
+                                     "batch_count": self._volume_batch_count, "pending_count": pending}
+        return report
+
     def _setup_activation(self):
         if self.activation_server is not None:
             self.activation_server.deleteLater()
         self.activation_server = ActivationServer(
-            "amplifier", self._activate_existing_window, self,
+            "amplifier", self._activate_existing_window, self, dump=self.state_dumper.request,
         )
         if not self.activation_server.available:
             record_exception(RuntimeError("Local activation endpoint unavailable"), "Window activation")
@@ -3886,6 +4089,8 @@ def configure_app_theme(config):
 
 def _run_application():
     app = QApplication(sys.argv)
+    if "--dump-state" in sys.argv[1:]:
+        return dump_existing_state("amplifier")
     if not check_qt_theme_support():
         return 1
     app.setStyle(TooltipDelayStyle())

@@ -137,3 +137,7 @@ YamahaRemote includes Windows Mica integration code inspired by
 [win32mica](https://github.com/marticliment/win32mica), licensed under the MIT License.
 
 The relevant license text is included in `THIRD_PARTY_LICENSES.txt`.
+
+### Cached state report
+
+Run `python YamahaRemote.pyw --dump-state` while the remote is running to save a timestamped diagnostic JSON beside the script (or in the app-data diagnostics folder if needed). This leaves the window as it is and makes no device queries; the result message gives the file path. Credentials and text-entry contents are omitted, but review reports before sharing.

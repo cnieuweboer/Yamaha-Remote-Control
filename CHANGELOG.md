@@ -4,6 +4,8 @@ Release identifiers below come from the corresponding commits. Some releases upd
 
 ## 2026-10-21
 
+- Yamaha Remote 2026.10.21.12 — Add --dump-state cached diagnostic reports through second-launch IPC, without activating the window or querying devices. Record bounded request outcomes, omit credentials/text/payloads, use timestamped files with app-data fallback, and ignore generated reports in Git.
+
 - Yamaha Remote 2026.10.21.11 — Track automatically maintained `Removed` flags without deleting input preferences or JSON positions. Confirm absence with another successful inventory after five seconds, retain entries on errors/standby, restore rediscovered entries, and rebuild dropdowns/favorites with immediate window resizing. Reuse ordinary status/input polling and add a 30-second visible/awake inventory refresh plus guarded verification; preserve unapplied JSON edits.
 
 - Yamaha Remote 2026.10.21.10 — Add the focused TV-volume exception to global amplifier shortcuts. Prepare the TV handler before advertising leased readiness; the amplifier yields only matching bindings for the actual TV foreground window while using another known input. Preserve global ownership elsewhere, SMTC priority, calibration guards, expiry and disconnect recovery. Add native-hook and cross-repository IPC regressions.

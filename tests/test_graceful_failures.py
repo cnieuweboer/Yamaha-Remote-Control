@@ -27,7 +27,7 @@ class CommandErrorTests(unittest.TestCase):
         window.set_offline = Mock(side_effect=invalidate)
         window.set_error_status = Mock(side_effect=invalidate)
         window.handle_request_error = lambda error, **kwargs: CLS.handle_request_error(window, error, **kwargs)
-        def run_worker(function, on_result=None, on_error=None, on_finished=None):
+        def run_worker(function, on_result=None, on_error=None, on_finished=None, **kwargs):
             try:
                 result = function()
             except Exception as error:
