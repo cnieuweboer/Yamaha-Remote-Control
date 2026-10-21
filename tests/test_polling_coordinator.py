@@ -23,6 +23,7 @@ class PollingTests(unittest.TestCase):
         self.w._speaker_outputs = ('a', 'b')
         self.w._speaker_discovery_running = False
         self.w.action_running = False
+        self.w._input_discovery_running = False
         self.w._polling_initialized = True
         self.w._native_volume_hook = None
         self.w.amplifier_server = None

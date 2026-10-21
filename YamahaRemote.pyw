@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFileIconProvider,
     QGridLayout,
+    QLayout,
     QFrame,
     QVBoxLayout,
     QMenu,
@@ -458,7 +459,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.21.10"
+__version__ = "2026.10.21.11"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -623,6 +624,7 @@ def _validate_entries(value, collection):
             "NameOverride",
             "Hidden",
             "Favorite",
+            "Removed",
         }
 
         if unknown_keys:
@@ -636,6 +638,7 @@ def _validate_entries(value, collection):
         name_override = settings.get("NameOverride", "")
         hidden = settings.get("Hidden", False)
         favorite = settings.get("Favorite", False)
+        removed = settings.get("Removed", False)
 
         if not isinstance(name, str) or not name.strip():
             raise ConfigError(
@@ -661,11 +664,15 @@ def _validate_entries(value, collection):
                 'must be true or false.'
             )
 
+        if not isinstance(removed, bool):
+            raise ConfigError(f'"{collection}" entry {input_id!r} "Removed" must be true or false.')
+
         normalized[input_id] = {
             "Name": name.strip(),
             "NameOverride": name_override.strip(),
             "Hidden": hidden,
             "Favorite": favorite,
+            "Removed": removed,
         }
 
     return normalized
@@ -846,13 +853,19 @@ def load_config():
         ) from ex
 
     config = validate_config(raw_config, allow_incomplete=True)
+    collections = ("Apps", "Inputs") if "Apps" in config else ("Inputs",)
+    missing_removed = any("Removed" not in item for collection in collections
+                          for item in raw_config.get(collection, {}).values())
     if ("Shortcuts" not in raw_config or set(DEFAULT_SHORTCUTS) - set(raw_config["Shortcuts"])
             or "GlobalShortcuts" not in raw_config or "GlobalVolumeHotkeys" in raw_config
-            or set(DEFAULT_CONFIG["GlobalShortcuts"]) - set(raw_config["GlobalShortcuts"])):
+            or set(DEFAULT_CONFIG["GlobalShortcuts"]) - set(raw_config["GlobalShortcuts"]) or missing_removed):
         updated = dict(raw_config)
         updated["Shortcuts"] = config["Shortcuts"]
         updated["GlobalShortcuts"] = config["GlobalShortcuts"]
         updated.pop("GlobalVolumeHotkeys", None)
+        if missing_removed:
+            for collection in collections:
+                updated[collection] = config[collection]
         save_config(updated, expected_digest=hashlib.sha256(content).digest())
     return config
 
@@ -1666,10 +1679,10 @@ class YamahaApi:
             + quote(input_id, safe="")
         )
 
-    def _get_features(self):
-        # Device calls use the single worker pool. Share stable capabilities
-        # between input/speaker discovery for this API instance only.
-        if self._features is not None:
+    def _get_features(self, *, refresh=False):
+        # Initial input/speaker discovery shares one response. Explicit inventory
+        # refreshes bypass the cache; device calls use the single worker pool.
+        if self._features is not None and not refresh:
             return self._features
         features = self._get_json("system/getFeatures")
         system = features.get("system")
@@ -1725,8 +1738,14 @@ class YamahaApi:
                     time.sleep(0.10)
         return current
 
-    def get_inputs(self):
-        features = self._get_features()
+    def get_inputs(self, *, refresh=False):
+        features = self._get_features(refresh=refresh)
+        system = features.get("system")
+        if (not isinstance(system, dict) or not isinstance(system.get("input_list"), list)
+                or any(not isinstance(item, dict) or not isinstance(item.get("id"), str)
+                       or not item["id"].strip() for item in system["input_list"])
+                or len({item["id"].strip() for item in system["input_list"]}) != len(system["input_list"])):
+            raise DeviceResponseError("Yamaha returned an invalid input inventory.")
 
         names = {}
 
@@ -2045,6 +2064,106 @@ def remaining_validity_ms(age_seconds, max_age_seconds):
     return int(max(0.0, min(max_age_seconds, max_age_seconds - age_seconds)) * 1000)
 
 
+# Discovery inventories retain preferences while absent entries are confirmed.
+DISCOVERY_INTERVAL_SECONDS = 30.0
+REMOVAL_CONFIRM_SECONDS = 5.0
+
+
+def _inventory_ids(entries, id_key, name_key):
+    if not isinstance(entries, list):
+        raise DeviceResponseError("Discovery did not return a complete inventory list.")
+    ids = []
+    for entry in entries:
+        if (not isinstance(entry, dict) or not isinstance(entry.get(id_key), str)
+                or not entry[id_key].strip() or not isinstance(entry.get(name_key), str)
+                or not entry[name_key].strip()):
+            raise DeviceResponseError("Discovery returned an invalid inventory entry.")
+        ids.append(entry[id_key].strip())
+    if len(set(ids)) != len(ids):
+        raise DeviceResponseError("Discovery returned duplicate inventory IDs.")
+    return set(ids)
+
+
+class DiscoveryTracker(QObject):
+    """Confirm absences with fresh inventories; reuse the ordinary status cadence."""
+
+    def __init__(self, parent, collections, refresh, allowed):
+        super().__init__(parent)
+        self.collections, self.refresh, self.allowed = collections, refresh, allowed
+        self.pending = {}
+        self.checked = {}
+        self.retry_after = {}
+        self.paused = False
+        self.verification = QTimer(self)
+        self.verification.setSingleShot(True)
+        self.verification.timeout.connect(self.tick)
+
+    def observe(self, collection, present, settings, *, allow_missing, observed_at=None):
+        now = time.monotonic() if observed_at is None else observed_at
+        missing = self.pending.setdefault(collection, {})
+        changed = False
+        for key, item in settings.items():
+            if "Removed" not in item:
+                item["Removed"] = False
+                changed = True
+            if key in present:
+                missing.pop(key, None)
+                if item["Removed"]:
+                    item["Removed"] = False
+                    changed = True
+            elif allow_missing and not item["Removed"]:
+                first = missing.setdefault(key, now)
+                if now - first >= REMOVAL_CONFIRM_SECONDS:
+                    item["Removed"] = True
+                    missing.pop(key, None)
+                    changed = True
+        if allow_missing or not any(key not in present and not item["Removed"]
+                                    for key, item in settings.items()):
+            self.checked[collection] = now
+        else:
+            missing.clear()  # Standby/unknown power cannot establish an absence.
+        self._arm()
+        return changed
+
+    def tick(self):
+        if self.paused:
+            return
+        now = time.monotonic()
+        for collection in self.collections:
+            if not self.allowed(collection):
+                continue
+            pending = self.pending.get(collection, {})
+            due = min(pending.values()) + REMOVAL_CONFIRM_SECONDS if pending else float("inf")
+            if (now >= self.retry_after.get(collection, 0)
+                    and (now >= due or now - self.checked.get(collection, 0) >= DISCOVERY_INTERVAL_SECONDS)):
+                self.retry_after[collection] = now + REMOVAL_CONFIRM_SECONDS
+                self.refresh(collection)
+        self._arm()
+
+    def _arm(self):
+        self.verification.stop()
+        if self.paused:
+            return
+        now = time.monotonic()
+        deadlines = [max(min(missing.values()) + REMOVAL_CONFIRM_SECONDS,
+                         self.retry_after.get(collection, 0))
+                     for collection, missing in self.pending.items()
+                     if missing and self.allowed(collection)]
+        if deadlines:
+            self.verification.start(max(1, int(max(0, min(deadlines) - now) * 1000) + 1))
+
+    def pause(self):
+        self.paused = True
+        self.verification.stop()
+        self.pending.clear()
+        self.checked.clear()
+        self.retry_after.clear()
+
+    def resume(self):
+        self.paused = False
+        self._arm()
+
+
 class PollingCoordinator(QObject):
     """Own ordinary polling policy and coalesced refresh scheduling.
 
@@ -2077,7 +2196,7 @@ class PollingCoordinator(QObject):
 
     def busy(self):
         w = self.window
-        return w.poll_running or w.action_running or w._calibration_operation
+        return w.poll_running or w.action_running or w._calibration_operation or w._input_discovery_running
 
     def update(self, refresh=False):
         interval = 250 if self.window.calibration_active else POLL_INTERVAL_MS
@@ -2225,6 +2344,8 @@ class YamahaRemote(QWidget):
         self._speaker_target = None
         self._speaker_grace_deadline = None
         self.input_settings = config["Inputs"]
+        self._input_discovery_running = False
+        self.discovery = DiscoveryTracker(self, ("Inputs",), self._refresh_discovery, self._can_discover)
         self.favorite_buttons = {}
         self.control_widgets = []
         self._polling_initialized = False
@@ -2460,7 +2581,7 @@ class YamahaRemote(QWidget):
             self.input_favorites_layout.removeWidget(button)
         self.favorite_buttons.clear()
         favorites = [(input_id, settings) for input_id, settings in
-                     _ordered_entries(self.input_settings, self.config["SortByName"]) if settings["Favorite"]]
+                     _ordered_entries(self.input_settings, self.config["SortByName"]) if settings["Favorite"] and not settings.get("Removed", False)]
         for index, (input_id, settings) in enumerate(favorites):
             button = buttons.pop(input_id, None)
             if button is None:
@@ -2500,6 +2621,10 @@ class YamahaRemote(QWidget):
         # then prevent manual resizing while the app is running.
         self.setMinimumHeight(0)
         self.setMaximumHeight(16777215)
+        # Recalculate nested section layouts before locking the new size.
+        for layout in reversed(self.findChildren(QLayout)):
+            layout.invalidate()
+            layout.activate()
         self.adjustSize()
         self.setFixedHeight(self.sizeHint().height())
 
@@ -2669,84 +2794,78 @@ class YamahaRemote(QWidget):
         self.load_inputs()
         self.load_speaker_outputs()
 
-    def load_inputs(self):
-        if self._shutting_down:
-            return
+    def _can_discover(self, collection):
+        return bool(not self._shutting_down and not self.calibration_active
+                    and not self._calibration_operation and self.connected
+                    and (self.last_status or {}).get("power") == "on"
+                    and self._last_status_at is not None
+                    and time.monotonic() - self._last_status_at < HOTKEY_STATE_MAX_AGE_SECONDS
+                    and self.isVisible() and not self.isMinimized() and self.polling.allowed())
 
-        if self.initialized:
+    def _refresh_discovery(self, collection):
+        if self._can_discover(collection) and not self.polling.busy() and not self._pending_hotkeys:
+            self.load_inputs(refresh=True)
+
+    def load_inputs(self, *, refresh=False):
+        if self._shutting_down or self.calibration_active or self._input_discovery_running:
+            return
+        if self.initialized and not refresh:
             self._request_poll()
             return
-
-        def done(inputs):
+        self._input_discovery_running = True
+        def query():
+            inputs = self.api.get_inputs(refresh=True) if refresh else self.api.get_inputs()
+            _inventory_ids(inputs, "Id", "Label")
+            return inputs, time.monotonic()
+        def done(result):
+            inputs, observed_at = result
             config_changed = False
-
             for item in inputs:
-                input_id = item["Id"]
-                yamaha_name = item["Label"]
+                input_id, name = item["Id"].strip(), item["Label"].strip()
                 settings = self.input_settings.get(input_id)
-
                 if settings is None:
-                    settings = {
-                        "Name": yamaha_name,
-                        "NameOverride": "",
-                        "Hidden": False,
-                        "Favorite": False,
-                    }
-                    self.input_settings[input_id] = settings
+                    self.input_settings[input_id] = {"Name": name, "NameOverride": "",
+                        "Hidden": False, "Favorite": False, "Removed": False}
                     config_changed = True
-                elif settings["Name"] != yamaha_name:
-                    settings["Name"] = yamaha_name
+                elif settings["Name"] != name:
+                    settings["Name"] = name
                     config_changed = True
-
-            # After a failed restart the file contains unapplied user edits.
-            # Discovery may update memory, but must not overwrite that file.
+            config_changed = self.discovery.observe(
+                "Inputs", {item["Id"].strip() for item in inputs}, self.input_settings,
+                allow_missing=self._can_discover("Inputs"), observed_at=observed_at) or config_changed
             if config_changed and not self._restart_failed:
                 try:
                     self._save_config_without_restart()
                 except ConfigError as ex:
                     record_exception(ex, "Configuration save")
-                    QMessageBox.warning(
-                        self,
-                        "Yamaha Remote - Configuration Warning",
-                        str(ex),
-                    )
-
-            available_ids = {item["Id"] for item in inputs}
-            visible_inputs = [
-                {"Id": input_id, "Label": _entry_display_name(settings)}
-                for input_id, settings in _ordered_entries(
-                    self.input_settings, self.config["SortByName"]
-                )
-                if input_id in available_ids and not settings["Hidden"]
-            ]
-
-            self._build_favorites_from_config()
-
-            self.inputs = visible_inputs
+                    QMessageBox.warning(self, "Yamaha Remote - Configuration Warning", str(ex))
+            first = not self.initialized
+            if config_changed or first:
+                self.input_combo.hidePopup()
+                self.inputs = [{"Id": key, "Label": _entry_display_name(settings)}
+                    for key, settings in _ordered_entries(self.input_settings, self.config["SortByName"])
+                    if not settings["Hidden"] and not settings.get("Removed", False)]
+                self._build_favorites_from_config()
+                self.input_combo.blockSignals(True)
+                self.input_combo.clear()
+                for item in self.inputs:
+                    self.input_combo.addItem(item["Label"], item["Id"])
+                    self.input_combo.setItemData(self.input_combo.count()-1, Qt.AlignCenter, Qt.TextAlignmentRole)
+                self.input_combo.blockSignals(False)
+                self._fit_and_lock_window()
             self.initialized = True
-            self.input_combo.clear()
-
-            for item in self.inputs:
-                self.input_combo.addItem(
-                    item["Label"],
-                    item["Id"],
-                )
-
-                index = self.input_combo.count() - 1
-                self.input_combo.setItemData(
-                    index,
-                    Qt.AlignCenter,
-                    Qt.TextAlignmentRole,
-                )
-
-            self._fit_and_lock_window()
-            self._request_poll()
-
-        self.run_worker(
-            self.api.get_inputs,
-            on_result=done,
-            on_error=lambda error: self.handle_request_error(error, background=True),
-        )
+            self.update_control_states()
+            if self.last_status:
+                self.show_cached_status()
+            if first:
+                self._request_poll()
+        def finished():
+            self._input_discovery_running = False
+            self.polling.finished()
+        accepted = self.run_worker(query, on_result=done,
+            on_error=lambda error: self.handle_request_error(error, background=True), on_finished=finished)
+        if accepted is False:
+            self._input_discovery_running = False
 
     def load_speaker_outputs(self):
         if self._shutting_down or self._speaker_outputs is not None or self._speaker_discovery_running:
@@ -2914,6 +3033,7 @@ class YamahaRemote(QWidget):
             if not self.initialized:
                 self.load_inputs()
             self._schedule_hotkey_drain()
+            self.discovery.tick()
 
         def failed(error):
             self.poll_running = False
@@ -3584,6 +3704,7 @@ class YamahaRemote(QWidget):
     def _pause_background_work(self):
         self._volume_batch_count = 0
         self._shutting_down = True
+        self.discovery.pause()
         self.polling.pause()
         if self.activation_server is not None:
             self.activation_server.close()
@@ -3605,12 +3726,14 @@ class YamahaRemote(QWidget):
         self.poll_running = False
         self.action_running = False
         self._speaker_discovery_running = False
+        self._input_discovery_running = False
         self._speaker_target = None
         self._update_speaker_ui()
         return active_timers
 
     def _resume_background_work(self, active_timers):
         self._shutting_down = False
+        self.discovery.resume()
         self._setup_activation()
         self._setup_calibration()
         self._config_restart_pending = False

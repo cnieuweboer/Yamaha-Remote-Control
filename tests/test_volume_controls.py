@@ -5,6 +5,7 @@ from contextlib import ExitStack
 from pathlib import Path
 import runpy
 import unittest
+import time
 from unittest.mock import Mock, patch
 from PySide6.QtCore import QCoreApplication, QEvent, Qt
 from PySide6.QtTest import QTest
@@ -29,6 +30,7 @@ class VolumeControlTests(unittest.TestCase):
                            '_setup_hotkeys', '_setup_tray', '_setup_config_watcher', 'initialize'):
                 stack.enter_context(patch.object(CLS, method, lambda self: None))
             window = CLS(config)
+        window.discovery.checked["Inputs"] = time.monotonic()
         window.show()
         self.app.processEvents()
         def cleanup():

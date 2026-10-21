@@ -4,6 +4,8 @@ Release identifiers below come from the corresponding commits. Some releases upd
 
 ## 2026-10-21
 
+- Yamaha Remote 2026.10.21.11 — Track automatically maintained `Removed` flags without deleting input preferences or JSON positions. Confirm absence with another successful inventory after five seconds, retain entries on errors/standby, restore rediscovered entries, and rebuild dropdowns/favorites with immediate window resizing. Reuse ordinary status/input polling and add a 30-second visible/awake inventory refresh plus guarded verification; preserve unapplied JSON edits.
+
 - Yamaha Remote 2026.10.21.10 — Add the focused TV-volume exception to global amplifier shortcuts. Prepare the TV handler before advertising leased readiness; the amplifier yields only matching bindings for the actual TV foreground window while using another known input. Preserve global ownership elsewhere, SMTC priority, calibration guards, expiry and disconnect recovery. Add native-hook and cross-repository IPC regressions.
 
 - Yamaha Remote 2026.10.21.9 — Replace the global enable toggle with independent configurable GlobalShortcuts for volume/mute. Preserve global settings on migration, validate native bindings before restart, keep bounded press ownership, and publish per-binding IPC ownership. Global bindings take priority over SMTC and focused shortcuts; retain hidden polling and offline/standby passthrough.
