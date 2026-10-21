@@ -197,3 +197,5 @@ Speaker discovery reads the first current output state in the same serialized wo
 ### Early Qt compatibility check
 
 Immediately after creating QApplication, startup checks for `QStyleHints.setColorScheme` before acquiring the instance lock or reading device configuration. If unavailable, it displays the PySide6 6.8+ requirement and upgrade command, then exits without starting device work. Feature detection avoids version-string parsing and silent theme fallback.
+
+Dropdown popups expand one Qt logical pixel left and right after native placement, without changing combobox button geometry. The expanded popup and live view geometry are captured before the custom animation starts and retained at completion; the expansion also applies with the workaround or UI animations disabled.

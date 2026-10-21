@@ -2,6 +2,10 @@
 
 Release identifiers below come from the corresponding commits. Some releases updated only the calibration helper; the remote and helper can therefore have different version numbers. Historical behavior may have been superseded by later releases.
 
+## 2026-10-21
+
+- 2026.10.21.1 — Expand dropdown popups one Qt logical pixel on each side while leaving combobox buttons unchanged. Use the expanded geometry throughout the live opening animation.
+
 ## 2026-10-20
 
 - 2026.10.20.10 — Rename the speaker-completion callback to avoid duplicate closure names and correct the earlier Mica changelog wording. Detect missing Qt theme support before acquiring the instance lock, display an explicit upgrade message, and remove unused imports.
