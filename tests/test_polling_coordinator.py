@@ -20,11 +20,9 @@ class PollingTests(unittest.TestCase):
         self.w = QWidget()
         self.w._shutting_down = self.w._calibration_operation = False
         self.w.calibration_active = self.w.poll_running = False
-        self.w._volume_rate_loop_running = self.w._volume_rate_step_running = False
-        self.w._amplifier_routed = False
         self.w._speaker_outputs = ('a', 'b')
         self.w._speaker_discovery_running = False
-        self.w.action_running = self.w._calibration_operation = False
+        self.w.action_running = False
         self.w._polling_initialized = True
         self.w._native_volume_hook = None
         self.w.amplifier_server = None
@@ -42,7 +40,7 @@ class PollingTests(unittest.TestCase):
         self.p.request(20)
         self.p.request(40)
         QTest.qWait(80)
-        self.w.poll_status.assert_called_once_with()
+        self.w.poll_status.assert_called_once_with(groups=self.p.GROUPS)
         self.assertFalse(self.p.pending)
 
     def test_active_poll_defers_refresh_until_finished(self):
@@ -53,7 +51,7 @@ class PollingTests(unittest.TestCase):
         self.w.poll_running = False
         self.p.finished()
         QTest.qWait(10)
-        self.w.poll_status.assert_called_once_with()
+        self.w.poll_status.assert_called_once_with(groups=self.p.GROUPS)
 
     def test_hidden_refresh_waits_for_visibility(self):
         self.w.hide()
@@ -63,7 +61,7 @@ class PollingTests(unittest.TestCase):
         self.w.show()
         self.p.update()
         QTest.qWait(10)
-        self.w.poll_status.assert_called_once_with()
+        self.w.poll_status.assert_called_once_with(groups=self.p.GROUPS)
 
     def test_pause_cancels_delayed_callbacks_and_resume_refreshes(self):
         self.p.request(20)
@@ -71,7 +69,7 @@ class PollingTests(unittest.TestCase):
         QTest.qWait(40)
         self.w.poll_status.assert_not_called()
         self.p.resume()
-        self.w.poll_status.assert_called_once_with()
+        self.w.poll_status.assert_called_once_with(groups=self.p.GROUPS)
         self.assertTrue(self.p.periodic.isActive())
 
     def test_refresh_defers_behind_action_and_calibration_operation(self):
@@ -85,7 +83,7 @@ class PollingTests(unittest.TestCase):
                 setattr(self.w, field, False)
                 self.p.finished()
                 QTest.qWait(10)
-                self.w.poll_status.assert_called_once_with()
+                self.w.poll_status.assert_called_once_with(groups=self.p.GROUPS)
 
     def test_periodic_tick_does_not_preempt_command_settling(self):
         self.p.request(100)
@@ -137,7 +135,7 @@ class PollingTests(unittest.TestCase):
         self.w._polling_initialized = True
         self.p.update()
         QTest.qWait(10)
-        self.w.poll_status.assert_called_once_with()
+        self.w.poll_status.assert_called_once_with(groups=self.p.GROUPS)
 
     def test_fresh_main_status_does_not_suppress_speaker_reads(self):
         self.p.observed('main', 100)

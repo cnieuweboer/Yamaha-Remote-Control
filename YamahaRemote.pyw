@@ -437,7 +437,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.21.4"
+__version__ = "2026.10.21.5"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -1924,10 +1924,7 @@ class PollingCoordinator(QObject):
         for group in groups:
             del self._scheduled[group]
         if groups:
-            if groups == self.GROUPS:
-                self.window.poll_status()
-            else:
-                self.window.poll_status(groups=groups)
+            self.window.poll_status(groups=groups)
         self._arm()
 
     def _periodic_due(self):
@@ -2635,7 +2632,7 @@ class YamahaRemote(QWidget):
             self.startup_status_timer.stop()
 
     def poll_status(self, groups=None):
-        if not self._should_poll():
+        if not self.polling.allowed():
             return
 
         if self.polling.busy():
@@ -2695,9 +2692,6 @@ class YamahaRemote(QWidget):
 
         self.run_worker(query, on_result=done, on_error=failed,
                         on_finished=self.polling.finished)
-
-    def _should_poll(self):
-        return self.polling.allowed()
 
     def _request_poll(self, delay_ms=0, groups=None):
         self.polling.request(delay_ms, groups)

@@ -306,7 +306,7 @@ class SpeakerUiTests(unittest.TestCase):
         status = {'power': 'on', 'input': 'tv', 'volume': 50}
         def worker(function, **callbacks):
             callbacks['on_result'](function())
-        with patch.object(window, '_should_poll', return_value=True), \
+        with patch.object(window.polling, 'allowed', return_value=True), \
              patch.object(window.api, 'get_status', return_value=status), \
              patch.object(window.api, 'get_speaker_state',
                           side_effect=ui_fixture.REMOTE['DeviceResponseError']('Unavailable')), \
@@ -328,7 +328,7 @@ class SpeakerUiTests(unittest.TestCase):
                 callbacks['on_result'](result)
             callbacks['on_finished']()
         self.window.initialized = True
-        with patch.object(self.window, '_should_poll', return_value=True), \
+        with patch.object(self.window.polling, 'allowed', return_value=True), \
              patch.object(self.window, 'run_worker', side_effect=worker):
             self.window.poll_status(groups=groups)
 
