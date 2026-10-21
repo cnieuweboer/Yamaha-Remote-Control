@@ -253,15 +253,15 @@ def _allow_foreground_activation(process_id):
             pass  # Window restoration still works if foreground permission is denied.
 
 
-def activate_existing_instance(role, timeout_ms=1500):
+def activate_existing_instance(role, timeout_seconds=1.5):
     """Bound startup retries and the complete handshake to one deadline."""
     socket = QLocalSocket()
     socket.setReadBufferSize(IPC_MAX_FRAME + 1)
     buffer = bytearray()
-    deadline = time.monotonic() + timeout_ms / 1000
+    deadline = time.monotonic() + timeout_seconds
 
     def remaining():
-        return max(0, int((deadline - time.monotonic()) * 1000))
+        return max(0.0, deadline - time.monotonic())
 
     def receive(expected):
         while remaining():
@@ -270,17 +270,17 @@ def activate_existing_instance(role, timeout_ms=1500):
                 if len(messages) != 1 or messages[0].get("type") != expected:
                     return None
                 return messages[0]
-            if not socket.waitForReadyRead(remaining()) and not socket.bytesAvailable():
+            if not socket.waitForReadyRead(int(remaining() * 1000)) and not socket.bytesAvailable():
                 return None
         return None
 
     try:
         while remaining():
             socket.connectToServer(ipc_server_name(role, channel="activation"))
-            if socket.waitForConnected(min(150, remaining())):
+            if socket.waitForConnected(int(min(0.15, remaining()) * 1000)):
                 break
             socket.abort()
-            time.sleep(min(0.05, remaining() / 1000))
+            time.sleep(min(0.05, remaining()))
         else:
             return False
         hello = receive("instance")
@@ -291,7 +291,7 @@ def activate_existing_instance(role, timeout_ms=1500):
         payload = _ipc_encode({"version": 1, "type": "activate"})
         if socket.write(payload) != len(payload):
             return False
-        if socket.bytesToWrite() and not socket.waitForBytesWritten(remaining()):
+        if socket.bytesToWrite() and not socket.waitForBytesWritten(int(remaining() * 1000)):
             return False
         reply = receive("activated")
         return bool(reply and reply.get("ok") is True)
@@ -437,7 +437,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.21.5"
+__version__ = "2026.10.21.6"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -1822,6 +1822,11 @@ class CenteredComboDelegate(QStyledItemDelegate):
 # ----------------------------
 
 
+def remaining_validity_ms(age_seconds, max_age_seconds):
+    """Convert a bounded remaining status lifetime to the IPC wire unit."""
+    return int(max(0.0, min(max_age_seconds, max_age_seconds - age_seconds)) * 1000)
+
+
 class PollingCoordinator(QObject):
     """Own ordinary polling policy and coalesced refresh scheduling.
 
@@ -1872,7 +1877,7 @@ class PollingCoordinator(QObject):
             self._arm()
 
     GROUPS = frozenset(("main", "speakers"))
-    FRESHNESS_SECONDS = POLL_INTERVAL_MS / 2000  # Half the normal interval.
+    FRESHNESS_SECONDS = POLL_INTERVAL_MS / 1000 / 2  # Half the normal interval.
 
     @property
     def pending(self):
@@ -2036,8 +2041,7 @@ class YamahaRemote(QWidget):
                        if self._speaker_state_at is not None else HOTKEY_STATE_MAX_AGE_SECONDS)
         state.update(speaker_outputs=list(self._speaker_outputs) if self._speaker_outputs is not None else None,
                      speaker_state=list(self._speaker_state) if self._speaker_state is not None else None,
-                     speaker_valid_for_ms=max(0, min(int(HOTKEY_STATE_MAX_AGE_SECONDS * 1000),
-                                                   int((HOTKEY_STATE_MAX_AGE_SECONDS - speaker_age) * 1000)))
+                     speaker_valid_for_ms=remaining_validity_ms(speaker_age, HOTKEY_STATE_MAX_AGE_SECONDS)
                      if self.connected and self._speaker_state is not None else 0)
         return state
 
@@ -2899,8 +2903,7 @@ class YamahaRemote(QWidget):
         status = self.last_status or {}
         age = (time.monotonic() - self._last_status_at
                if self._last_status_at is not None else HOTKEY_STATE_MAX_AGE_SECONDS)
-        valid_for = max(0, min(int(HOTKEY_STATE_MAX_AGE_SECONDS * 1000),
-                               int((HOTKEY_STATE_MAX_AGE_SECONDS - age) * 1000)))
+        valid_for = remaining_validity_ms(age, HOTKEY_STATE_MAX_AGE_SECONDS)
         def raw(key):
             value = status.get(key)
             return value if type(value) in (int, float) and math.isfinite(value) else None

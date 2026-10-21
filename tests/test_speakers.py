@@ -395,6 +395,46 @@ class SpeakerUiTests(unittest.TestCase):
             poll.assert_called_once_with(groups={'main'})
             speakers.assert_not_called()
 
+    def test_real_periodic_timer_skips_pending_then_fresh_main_and_resumes(self):
+        self.discover()
+        window = self.window
+        window.config['Host'] = '127.0.0.1'
+        window._polling_initialized = window.initialized = True
+        coordinator = window.polling
+        ticks = []
+        status = dict(window.last_status, mute=False, max_volume=154)
+        with patch.object(window.api, 'get_status', return_value=status) as main, \
+             patch.object(window.api, 'get_speaker_state', return_value=(True, False)) as speakers, \
+             patch.dict(self.globals, POLL_INTERVAL_MS=300), \
+             patch.object(type(coordinator), 'FRESHNESS_SECONDS', 0.15):
+            def tick():
+                ticks.append(main.call_count)
+            # Observe counts before the real coordinator starts each worker.
+            coordinator.periodic.timeout.disconnect(coordinator._periodic_due)
+            coordinator.periodic.timeout.connect(tick)
+            coordinator.periodic.timeout.connect(coordinator._periodic_due)
+            try:
+                coordinator.invalidate()
+                coordinator.update()
+                coordinator.request(525, groups={'main'})
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline:
+                    self.fixture.app.processEvents()
+                    if len(ticks) >= 3 and main.call_count >= 2 and not window._workers:
+                        break
+                    # Yield the GIL so real Python worker threads can run.
+                    time.sleep(0.002)
+                else:
+                    self.fail('Timed out waiting for real timer/worker cycles')
+                self.assertEqual(ticks[:3], [0, 1, 1])
+                self.assertEqual(main.call_count, 2)
+                self.assertGreaterEqual(speakers.call_count, 3)
+                self.assertEqual(window.last_status, status)
+                self.assertTrue(window.volume_up.isEnabled())
+            finally:
+                coordinator.pause()
+                coordinator.periodic.timeout.disconnect(tick)
+
     def test_input_favorites_are_below_combo_and_window_grows_to_fit(self):
         window = self.window
         before = window.height()
