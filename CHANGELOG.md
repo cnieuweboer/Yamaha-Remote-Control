@@ -4,6 +4,8 @@ Release identifiers below come from the corresponding commits. Some releases upd
 
 ## 2026-10-21
 
+- Yamaha Remote 2026.10.21.2 — Share one successful system/getFeatures response between input and speaker discovery for each API instance. Retry failed/malformed capability responses; keep name and speaker-state reads separate.
+
 - 2026.10.21.1 — Expand dropdown popups one Qt logical pixel on each side while leaving combobox buttons unchanged. Use the expanded geometry throughout the live opening animation.
 
 ## 2026-10-20

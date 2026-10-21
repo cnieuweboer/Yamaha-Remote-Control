@@ -68,6 +68,46 @@ class SpeakerApiTests(unittest.TestCase):
         for outputs in (('a', 'b'), ('a',), ('b',), ()):
             self.assertEqual(self.api(SpeakerDevice(outputs=outputs)).get_speaker_outputs(), outputs)
 
+    def test_input_and_speaker_discovery_share_one_features_response(self):
+        for speaker_first in (False, True):
+            with self.subTest(speaker_first=speaker_first):
+                api = REMOTE['YamahaApi']('127.0.0.1')
+                features = {'system': {'func_list': ['speaker_a', 'speaker_b'],
+                                       'input_list': [{'id': 'tv'}]}}
+                api._get_json = Mock(side_effect=lambda path: features if path == 'system/getFeatures'
+                                     else {'input_list': [{'id': 'tv', 'text': 'Television'}]})
+                if speaker_first:
+                    self.assertEqual(api.get_speaker_outputs(), ('a', 'b'))
+                self.assertEqual(api.get_inputs(), [{'Id': 'tv', 'Label': 'Television'}])
+                self.assertEqual(api.get_speaker_outputs(), ('a', 'b'))
+                calls = [call.args[0] for call in api._get_json.call_args_list]
+                self.assertEqual(calls.count('system/getFeatures'), 1)
+                self.assertEqual(calls.count('system/getNameText'), 1)
+
+    def test_failed_or_malformed_features_are_not_cached(self):
+        for failure in (REMOTE['YamahaConnectionError']('offline'),
+                        {'system': {'func_list': None}}):
+            with self.subTest(failure=failure):
+                api = REMOTE['YamahaApi']('127.0.0.1')
+                api._get_json = Mock(side_effect=[failure, {'system': {'func_list': ['speaker_a']}}])
+                with self.assertRaises(REMOTE['DeviceConnectionError'] if isinstance(failure, Exception)
+                                       else REMOTE['DeviceResponseError']):
+                    api.get_speaker_outputs()
+                self.assertEqual(api.get_speaker_outputs(), ('a',))
+                self.assertEqual(api.get_speaker_outputs(), ('a',))
+                self.assertEqual(api._get_json.call_count, 2)
+
+    def test_unsupported_capabilities_are_cached_only_for_that_api_instance(self):
+        first = REMOTE['YamahaApi']('127.0.0.1')
+        first._get_json = Mock(return_value={'system': {}})
+        self.assertEqual(first.get_speaker_outputs(), ())
+        self.assertEqual(first.get_speaker_outputs(), ())
+        first._get_json.assert_called_once_with('system/getFeatures')
+        second = REMOTE['YamahaApi']('127.0.0.1')
+        second._get_json = Mock(return_value={'system': {'func_list': ['speaker_a']}})
+        self.assertEqual(second.get_speaker_outputs(), ('a',))
+        second._get_json.assert_called_once_with('system/getFeatures')
+
     def test_invalid_capabilities_and_boolean_states_are_rejected(self):
         api = self.api(SpeakerDevice())
         for system in (None, [], {'func_list': None}):

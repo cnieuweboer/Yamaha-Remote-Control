@@ -437,7 +437,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.21.1"
+__version__ = "2026.10.21.2"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -1353,6 +1353,7 @@ def _decimal_places(value):
 class YamahaApi:
     def __init__(self, host, config=None):
         self.config = config or {}
+        self._features = None
 
         try:
             address = ipaddress.ip_address(host)
@@ -1467,8 +1468,22 @@ class YamahaApi:
             + quote(input_id, safe="")
         )
 
-    def get_speaker_outputs(self):
+    def _get_features(self):
+        # Device calls use the single worker pool. Share stable capabilities
+        # between input/speaker discovery for this API instance only.
+        if self._features is not None:
+            return self._features
         features = self._get_json("system/getFeatures")
+        system = features.get("system")
+        if (isinstance(system, dict) and isinstance(system.get("func_list", []), list)
+                and isinstance(system.get("input_list", []), list)
+                and all(isinstance(item, dict) for item in system.get("input_list", []))):
+            self._features = features
+        # Leave malformed capability responses uncached so discovery can retry.
+        return features
+
+    def get_speaker_outputs(self):
+        features = self._get_features()
         system = features.get("system", {})
         functions = system.get("func_list", []) if isinstance(system, dict) else None
         if not isinstance(functions, list):
@@ -1513,9 +1528,7 @@ class YamahaApi:
         return current
 
     def get_inputs(self):
-        features = self._get_json(
-            "system/getFeatures"
-        )
+        features = self._get_features()
 
         names = {}
 
