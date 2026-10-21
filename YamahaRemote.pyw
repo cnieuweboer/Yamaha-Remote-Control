@@ -62,6 +62,7 @@ def ipc_server_name(role, *, channel=None):
 
 IPC_SERVER_NAME = ipc_server_name("amplifier")
 IPC_MAX_FRAME = 4096
+IPC_MAX_TV_CONTEXT_VALIDITY_MS = 6000  # Protocol v1 wire limit.
 
 
 def _ipc_encode(message):
@@ -104,6 +105,7 @@ class AmplifierServer(QObject):
         self.command = command
         self.changed = changed
         self.clients = {}
+        self.focused_volume = {}
         self.server = QLocalServer(self)
         self.server.setSocketOptions(QLocalServer.UserAccessOption)
         self.server.setMaxPendingConnections(8)
@@ -136,6 +138,7 @@ class AmplifierServer(QObject):
     def _remove(self, socket):
         if socket in self.clients:
             del self.clients[socket]
+            self.focused_volume.pop(socket, None)
             socket.deleteLater()
             self.changed()
 
@@ -148,6 +151,23 @@ class AmplifierServer(QObject):
     def _read(self, socket):
         try:
             for message in _ipc_frames(socket, self.clients[socket]):
+                if message.get("type") == "focused_volume":
+                    window, bindings, input_id, valid_for = (message.get(key) for key in
+                        ("window", "shortcuts", "input", "valid_for_ms"))
+                    if (type(window) is not int or not 0 <= window < 2**64
+                            or not isinstance(input_id, str) or len(input_id) > 256
+                            or type(valid_for) is not int or not 0 <= valid_for <= IPC_MAX_TV_CONTEXT_VALIDITY_MS
+                            or not isinstance(bindings, list) or len(bindings) > 128
+                            or any(type(code) is not int or not 0 < code <= 0x7FFFFFFF for code in bindings)
+                            or len(set(bindings)) != len(bindings)):
+                        raise ValueError("Invalid focused volume context")
+                    if window and bindings and input_id and valid_for:
+                        self.focused_volume[socket] = (window, tuple(bindings), input_id,
+                                                      time.monotonic() + valid_for / 1000)
+                    else:
+                        self.focused_volume.pop(socket, None)
+                    self.changed()
+                    continue
                 if (message.get("type") != "command"
                         or type(message.get("id")) is not int
                         or not isinstance(message.get("input"), str)
@@ -438,7 +458,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.21.9"
+__version__ = "2026.10.21.10"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -2214,6 +2234,7 @@ class YamahaRemote(QWidget):
         self._hotkey_drain_scheduled = False
         self._hotkey_state_refresh_pending = False
         self._hotkey_state = (False, 0, None, False)
+        self._focused_tv_overrides = ()
         self._qt_volume_keys = _VolumeKeyState()
         self._native_volume_hook = None
 
@@ -3098,10 +3119,34 @@ class YamahaRemote(QWidget):
             self.amplifier_server.deleteLater()
         self.amplifier_server = AmplifierServer(
             self._amplifier_snapshot, self._accept_ipc_command,
-            lambda: self._update_polling_state(refresh=True), self,
+            self._ipc_clients_changed, self,
         )
         if not self.amplifier_server.available:
             record_exception(RuntimeError("Local amplifier endpoint unavailable"), "Local amplifier IPC")
+
+    def _ipc_clients_changed(self):
+        self._publish_hotkey_state()
+        self._update_polling_state(refresh=True)
+
+    def _focused_tv_grant(self, context):
+        # GUI-thread policy. Input identity comes from the TV peer, never its JSON.
+        if (context is None or self.calibration_active or not self.global_volume_hotkeys_active):
+            return None
+        window, bindings, tv_input, deadline = context
+        current_input = (self.last_status or {}).get("input")
+        valid_for = max(0, min(IPC_MAX_TV_CONTEXT_VALIDITY_MS, int((deadline - time.monotonic()) * 1000)))
+        if not valid_for or not current_input or current_input == tv_input:
+            return None
+        candidates = set()
+        for code in bindings:
+            try:
+                candidates.add(_native_binding(code))
+            except ConfigError:
+                continue
+        granted = [code for code in self._active_global_codes() if _native_binding(code) in candidates]
+        if not granted:
+            return None
+        return {"window": window, "shortcuts": granted, "valid_for_ms": valid_for}
 
     def _amplifier_snapshot(self):
         status = self.last_status or {}
@@ -3124,6 +3169,7 @@ class YamahaRemote(QWidget):
                 "global_hotkeys_enabled": bool(self._global_bindings),
                 "global_hotkeys_active": self.global_volume_hotkeys_active,
                 "global_shortcuts": self._active_global_codes(),
+                "focused_volume_override_supported": True,
                 "calibration_active": self.calibration_active,
                 "valid_for_ms": valid_for if self.connected and not self._shutting_down else 0}
 
@@ -3188,7 +3234,15 @@ class YamahaRemote(QWidget):
             int(self.winId()) if sys.platform == "win32" and self.isVisible() and not self.isMinimized() else 0,
             self._last_status_at, (QApplication.activeModalWidget() is not None or QApplication.activePopupWidget() is not None),
         )
+        overrides = []
+        if self.amplifier_server is not None:
+            for context in self.amplifier_server.focused_volume.values():
+                grant = self._focused_tv_grant(context)
+                if grant:
+                    overrides.append((grant["window"], context[3],
+                                      frozenset(_native_binding(code) for code in grant["shortcuts"])))
         with self._hotkey_lock:
+            self._focused_tv_overrides = tuple(overrides)
             self._hotkey_state = state
             if not state[0]:
                 self._pending_hotkeys.clear()
@@ -3210,7 +3264,7 @@ class YamahaRemote(QWidget):
                 and time.monotonic() - observed_at <= HOTKEY_STATE_MAX_AGE_SECONDS):
             binding = self._global_native_bindings.get((key, modifiers))
             if binding:
-                return ("global", binding)
+                return ("global", (key, modifiers), binding)
         # Only physical volume keys need a native focused fallback.
         qt_key = _NATIVE_QT_VOLUME_KEYS.get(key)
         return self._shortcut_bindings.get(qt_key | modifiers) if qt_key else None
@@ -3225,6 +3279,10 @@ class YamahaRemote(QWidget):
             if (action not in _VOLUME_KEYS.values() or not eligible or blocked or observed_at is None
                     or time.monotonic() - observed_at > HOTKEY_STATE_MAX_AGE_SECONDS
                     or (not global_binding and (not window or foreground != window))):
+                return False
+            if global_binding and any(
+                    foreground == target and time.monotonic() < deadline and command[1] in bindings
+                    for target, deadline, bindings in self._focused_tv_overrides):
                 return False
             self._enqueue_hotkey_locked(action)
             return True

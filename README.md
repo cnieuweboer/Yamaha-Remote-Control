@@ -105,7 +105,7 @@ Names use [Qt portable shortcut notation](https://doc.qt.io/qt-6/qkeysequence.ht
 
 By default, volume keys control the amplifier while this window is focused. To use them globally on Windows, set `GlobalShortcuts` to `{"VolumeUp": ["Volume Up"], "VolumeDown": ["Volume Down"], "Mute": ["Volume Mute"]}`; `[]` or `""` disables each global action. Existing enabled global media keys are migrated automatically.
 
-Global bindings capture those keys in other apps while the amplifier is on and available. Avoid everyday typing keys such as `A`; prefer media keys or uncommon modified combinations. Priority is amplifier global bindings, then SMTC playback, then focused shortcuts.
+Global bindings capture those keys in other apps while the amplifier is on and available. Avoid everyday typing keys such as `A`; prefer media keys or uncommon modified combinations. Priority is amplifier global bindings, then SMTC playback, then focused shortcuts. Exception: with Sony focused and ready to control an active TV, matching volume keys control the TV while the amplifier uses another input; the TV input must be configured or supplied by calibration.
 
 Changing or disabling a focused binding does not change the global media keys. Global control applies on every amplifier input, and other media keys keep their usual behavior. On macOS and Linux, volume shortcuts work only while the remote is focused.
 
