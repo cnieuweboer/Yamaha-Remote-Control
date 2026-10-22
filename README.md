@@ -33,12 +33,6 @@ python3 -m pip install "PySide6>=6.8"
 python3 YamahaRemote.pyw
 ```
 
-The volume `−` and `+` buttons repeat while held, starting after half a second.
-
-The Input section keeps its selector above favorite inputs. The Volume section includes a speaker selector next to Mute: Off/A for A-only amplifiers, or Off/A/B/A+B when both outputs are advertised; unsupported devices show it disabled.
-
-Speaker selection updates immediately while the amplifier applies and confirms the change. Switching between A and B first confirms the unwanted output is off before enabling the other.
-
 ## Configuration
 
 ```json
