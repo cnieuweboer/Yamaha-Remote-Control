@@ -506,7 +506,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.22.1"
+__version__ = "2026.10.22.2"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -793,9 +793,10 @@ def _shortcut_tip(config, command):
     action = next((name for name, value in SHORTCUT_ACTIONS.items() if value == command), None)
     labels = [QKeySequence.fromString(text, QKeySequence.PortableText).toString(QKeySequence.NativeText)
               for text in config["Shortcuts"].get(action, [])]
-    lines = ["Shortcut: " + " / ".join(labels)] if labels else []
     global_labels = [QKeySequence.fromString(text, QKeySequence.PortableText).toString(QKeySequence.NativeText)
                      for text in config.get("GlobalShortcuts", {}).get(action, [])]
+    labels = [label for label in labels if label not in global_labels]
+    lines = ["Shortcut: " + " / ".join(labels)] if labels else []
     if global_labels:
         lines.append("Global shortcut: " + " / ".join(global_labels))
     return "\n".join(lines)

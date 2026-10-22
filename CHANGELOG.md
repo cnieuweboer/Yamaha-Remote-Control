@@ -4,6 +4,8 @@ Release identifiers below come from the corresponding commits. Some releases upd
 
 ## 2026-10-22
 
+- Yamaha Remote 2026.10.22.2 — Show overlapping focused/global bindings only as global shortcuts in button tooltips; retain distinct focused bindings. Shortcut handling is unchanged.
+
 - Yamaha Remote 2026.10.22.1 — Include session-only polling success, empty-inventory, failure-category and recovery counters in both dump formats, plus grouped request totals. Preserve polling, exceptions, removal and recovery behavior.
 
 ## 2026-10-21

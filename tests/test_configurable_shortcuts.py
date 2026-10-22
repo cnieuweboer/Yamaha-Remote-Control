@@ -63,6 +63,19 @@ class ShortcutConfigurationTests(unittest.TestCase):
         self.assertIn('Ctrl+Alt+Up', REMOTE['_shortcut_tip'](config, 'volume_up'))
         self.assertEqual(REMOTE['_shortcut_tip'](self.validate({'Mute': []}), 'mute'), '')
 
+    @unittest.skipIf(IS_TV, 'Amplifier global shortcut tooltips')
+    def test_tooltip_lists_overlapping_binding_only_as_global(self):
+        config = REMOTE['_default_config_copy']()
+        config['Shortcuts']['VolumeUp'] = ['F8', 'F9']
+        config['GlobalShortcuts']['VolumeUp'] = ['F8', 'F10']
+        self.assertEqual(REMOTE['_shortcut_tip'](config, 'volume_up'),
+                         'Shortcut: F9\nGlobal shortcut: F8 / F10')
+        config['Shortcuts']['VolumeUp'] = ['F8']
+        self.assertEqual(REMOTE['_shortcut_tip'](config, 'volume_up'),
+                         'Global shortcut: F8 / F10')
+        config['GlobalShortcuts']['VolumeUp'] = []
+        self.assertEqual(REMOTE['_shortcut_tip'](config, 'volume_up'), 'Shortcut: F8')
+
     def test_loading_adds_missing_defaults_but_preserves_disabled_actions(self):
         load = REMOTE['load_config']
         for shortcuts in (None, {'Mute': ''}):
