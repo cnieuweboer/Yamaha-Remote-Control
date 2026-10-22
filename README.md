@@ -100,12 +100,6 @@ Names use [Qt portable shortcut notation](https://doc.qt.io/qt-6/qkeysequence.ht
 
 By default, volume keys control the amplifier while this window is focused. To use them globally on Windows, set `GlobalShortcuts` to `{"VolumeUp": ["Volume Up"], "VolumeDown": ["Volume Down"], "Mute": ["Volume Mute"]}`; `[]` or `""` disables each global action. Existing enabled global media keys are migrated automatically.
 
-## Use with Sony Remote
-
-Run both remotes to let Sony control amplifier volume directly and avoid the slower TV/CEC path. The Sony Remote automatically falls back to TV volume when the amplifier is unavailable, in standby, or on another input.
-
-A completed calibration supplies the amplifier's TV input and TV-scale volume display automatically. Without calibration, set `AmplifierTVInput` in Sony Remote to the input ID from Yamaha Remote's `Inputs` keys, rather than its display name.
-
 ## More information
 
 - [Implementation details](IMPLEMENTATION.md) — hotkeys, IPC, and calibration coordination.
