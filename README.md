@@ -102,7 +102,7 @@ By default, volume keys control the amplifier while this window is focused. To u
 
 ## Use with Sony Remote
 
-Run both remotes to let Sony control amplifier volume directly and avoid the slower TV/CEC path. Sony automatically falls back to TV volume when the amplifier is unavailable, in standby, or on another input.
+Run both remotes to let Sony control amplifier volume directly and avoid the slower TV/CEC path. The Sony Remote automatically falls back to TV volume when the amplifier is unavailable, in standby, or on another input.
 
 A completed calibration supplies the amplifier's TV input and TV-scale volume display automatically. Without calibration, set `AmplifierTVInput` in Sony Remote to the input ID from Yamaha Remote's `Inputs` keys, rather than its display name.
 
