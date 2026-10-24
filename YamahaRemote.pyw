@@ -506,7 +506,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.24.4"
+__version__ = "2026.10.24.5"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -1822,7 +1822,7 @@ class YamahaApi:
         else:
             self.volume_db_decimals = 0
 
-    def _get_json(self, path, timeout=NETWORK_TIMEOUT_SECONDS):
+    def _get_json(self, path, timeout=NETWORK_TIMEOUT_SECONDS, *, validate=None):
         try:
             with DEVICE_HTTP_OPENER.open(
                 f"{self.base_url}/{path}",
@@ -1854,8 +1854,47 @@ class YamahaApi:
             self.polling_responses.failed(path, "device_rejections")
             raise DeviceResponseError(f"Yamaha returned response code {response_code}.")
 
+        try:
+            self._validate_poll_response(path, data)
+            if validate is not None:
+                validate(data)
+        except DeviceResponseError:
+            self.polling_responses.failed(path, "malformed_responses")
+            raise
         self.polling_responses.record(path, data)
         return data
+
+    @staticmethod
+    def _validate_poll_response(path, data):
+        if path == "main/getStatus":
+            if data.get("power") not in ("on", "standby"):
+                raise DeviceResponseError("Yamaha returned an invalid power status.")
+            required = ("volume", "mute", "input") if data["power"] == "on" else ()
+            if any(key not in data for key in required):
+                raise DeviceResponseError("Yamaha status is missing volume, mute or input information.")
+            for key in ("volume", "max_volume"):
+                if key in data and (type(data[key]) not in (int, float)
+                                    or not math.isfinite(data[key]) or data[key] < 0):
+                    raise DeviceResponseError("Yamaha returned invalid volume information.")
+            if (("mute" in data and type(data["mute"]) is not bool)
+                    or ("input" in data and not isinstance(data["input"], str))):
+                raise DeviceResponseError("Yamaha returned invalid mute or input information.")
+        elif path == "system/getFeatures":
+            system = data.get("system")
+            if (not isinstance(system, dict) or not isinstance(system.get("input_list"), list)
+                    or any(not isinstance(item, dict) or not isinstance(item.get("id"), str)
+                           or not item["id"].strip() for item in system["input_list"])
+                    or len({item["id"].strip() for item in system["input_list"]}) != len(system["input_list"])
+                    or not isinstance(system.get("func_list", []), list)
+                    or any(not isinstance(item, str) for item in system.get("func_list", []))):
+                raise DeviceResponseError("Yamaha returned invalid input or speaker capabilities.")
+        elif path == "system/getNameText":
+            entries = data.get("input_list", [])
+            if (not isinstance(entries, list)
+                    or any(not isinstance(item, dict)
+                           or any(not isinstance(item.get(key), str) for key in ("id", "text"))
+                           for item in entries)):
+                raise DeviceResponseError("Yamaha returned invalid input names.")
 
     def get_status(self, timeout=NETWORK_TIMEOUT_SECONDS):
         return self._get_json(
@@ -1927,34 +1966,22 @@ class YamahaApi:
         # refreshes bypass the cache; device calls use the single worker pool.
         if self._features is not None and not refresh:
             return self._features
-        features = self._get_json("system/getFeatures")
-        system = features.get("system")
-        if (isinstance(system, dict) and isinstance(system.get("func_list", []), list)
-                and isinstance(system.get("input_list", []), list)
-                and all(isinstance(item, dict) for item in system.get("input_list", []))):
-            self._features = features
-        # Leave malformed capability responses uncached so discovery can retry.
-        return features
+        # The request validates consumed capabilities before counting/caching it.
+        self._features = self._get_json("system/getFeatures")
+        return self._features
 
     def get_speaker_outputs(self):
         features = self._get_features()
-        system = features.get("system", {})
-        functions = system.get("func_list", []) if isinstance(system, dict) else None
-        if not isinstance(functions, list):
-            raise DeviceResponseError("Yamaha returned invalid speaker capabilities.")
+        functions = features["system"].get("func_list", [])
         return tuple(name for name in ("a", "b") if f"speaker_{name}" in functions)
 
     def get_speaker_state(self, outputs):
-        status = self._get_json("system/getFuncStatus")
-        state = []
-        for name in ("a", "b"):
-            if name not in outputs:
-                state.append(False)
-            elif type(status.get(f"speaker_{name}")) is bool:
-                state.append(status[f"speaker_{name}"])
-            else:
-                raise DeviceResponseError(f"Yamaha did not report a valid Speaker {name.upper()} state.")
-        return tuple(state)
+        def validate(status):
+            for name in outputs:
+                if type(status.get(f"speaker_{name}")) is not bool:
+                    raise DeviceResponseError(f"Yamaha did not report a valid Speaker {name.upper()} state.")
+        status = self._get_json("system/getFuncStatus", validate=validate)
+        return tuple(status[f"speaker_{name}"] if name in outputs else False for name in ("a", "b"))
 
     def set_speakers(self, target, outputs):
         if (not outputs or not isinstance(target, (tuple, list)) or len(target) != 2
@@ -1983,13 +2010,6 @@ class YamahaApi:
 
     def get_inputs(self, *, refresh=False):
         features = self._get_features(refresh=refresh)
-        system = features.get("system")
-        if (not isinstance(system, dict) or not isinstance(system.get("input_list"), list)
-                or any(not isinstance(item, dict) or not isinstance(item.get("id"), str)
-                       or not item["id"].strip() for item in system["input_list"])
-                or len({item["id"].strip() for item in system["input_list"]}) != len(system["input_list"])):
-            raise DeviceResponseError("Yamaha returned an invalid input inventory.")
-
         names = {}
 
         try:

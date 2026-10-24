@@ -112,7 +112,7 @@ class DumpTests(unittest.TestCase):
 
     def test_actual_api_caches_reads_but_not_commands_or_failed_responses(self):
         api = R[BRAND + 'Api']('device.local', 'SECRET_PSK') if BRAND == 'Sony' else R['YamahaApi']('device.local')
-        success = {'result': [{'status': 'active'}], 'extra': 'preserved'} if BRAND == 'Sony' else {'response_code': 0, 'power': 'on', 'extra': 'preserved'}
+        success = {'result': [{'status': 'active'}], 'extra': 'preserved'} if BRAND == 'Sony' else {'response_code': 0, 'power': 'on', 'volume': 20, 'mute': False, 'input': 'tv', 'extra': 'preserved'}
         globals_ = R[BRAND + 'Api'].__init__.__globals__
         reply = Mock()
         reply.read.return_value = json.dumps(success).encode()
@@ -184,7 +184,7 @@ class DumpTests(unittest.TestCase):
         read = api.get_power if BRAND == 'Sony' else api.get_status
         opener = MagicMock()
         globals_ = R[BRAND + 'Api'].__init__.__globals__
-        success = {'result': [{'status': 'active'}]} if BRAND == 'Sony' else {'response_code': 0, 'power': 'on'}
+        success = {'result': [{'status': 'active'}]} if BRAND == 'Sony' else {'response_code': 0, 'power': 'on', 'volume': 20, 'mute': False, 'input': 'tv'}
         malformed = {'result': 12} if BRAND == 'Sony' else {'response_code': 'bad'}
         rejected = {'error': [1, 'SECRET']} if BRAND == 'Sony' else {'response_code': 1}
         with patch.dict(globals_, {'DEVICE_HTTP_OPENER': opener}):

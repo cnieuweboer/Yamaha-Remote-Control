@@ -4,6 +4,8 @@ Release identifiers below come from the corresponding commits. Some releases upd
 
 ## 2026-10-24
 
+- Yamaha Remote 2026.10.24.5 — Validate consumed polling response contents before recording success or recovery. Malformed main status, input/speaker capabilities, advertised speaker states and input names now raise DeviceResponseError, increment malformed-response counters once, and preserve the last valid cached response. Invalid capabilities are not cached; valid empty inventories and unsupported speaker outputs retain their existing behavior.
+
 - Yamaha Remote 2026.10.24.4 — Support focused MouseMiddle/MouseBack/MouseForward and WheelUp/Down/Left/Right bindings in Shortcuts, preserving normal dropdown/text-field interaction and keyboard-only global ownership. Include mouse bindings in button shortcut tooltips.
 
 - Yamaha Remote 2026.10.24.3 — Centralize filling and saving missing configuration settings from DEFAULT_CONFIG, including nested settings blocks. Preserve explicit values and keep discovered app/input entry handling separate.

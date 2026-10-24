@@ -6,7 +6,7 @@ import runpy
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 from PySide6.QtWidgets import QApplication, QWidget
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -235,8 +235,11 @@ class InventoryApiTests(unittest.TestCase):
 
     def test_incomplete_capabilities_never_become_an_empty_inventory(self):
         api = R['YamahaApi']('device.local',R['_default_config_copy']())
+        opener = MagicMock()
         for features in ({},{'system':{}},{'system':{'input_list':[{}]}},
                          {'system':{'input_list':[{'id':'a'},{'id':'a'}]}}):
-            with self.subTest(features=features),patch.object(api,'_get_json',return_value=features), \
+            opener.open.return_value.__enter__.return_value.read.return_value = json.dumps(
+                dict(response_code=0, **features)).encode()
+            with self.subTest(features=features),patch.dict(G, DEVICE_HTTP_OPENER=opener), \
                  self.assertRaises(R['DeviceResponseError']):
                 api.get_inputs(refresh=True)

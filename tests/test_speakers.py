@@ -1,5 +1,6 @@
 """Delayed speaker status and section layout with fake devices; no real outputs."""
 import os
+import json
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 from pathlib import Path
 import runpy
@@ -7,7 +8,7 @@ import threading
 import time
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 from PySide6.QtCore import QTimer
 from PySide6.QtTest import QTest
 import test_volume_controls as ui_fixture
@@ -61,7 +62,12 @@ class SpeakerDevice:
 class SpeakerApiTests(unittest.TestCase):
     def api(self, device):
         api = REMOTE['YamahaApi']('127.0.0.1')
-        api._get_json = device.get
+        def request(path, *, validate=None):
+            data = device.get(path)
+            if validate is not None:
+                validate(data)
+            return data
+        api._get_json = request
         return api
 
     def test_capabilities_and_unsupported_devices(self):
@@ -86,38 +92,50 @@ class SpeakerApiTests(unittest.TestCase):
 
     def test_failed_or_malformed_features_are_not_cached(self):
         for failure in (REMOTE['YamahaConnectionError']('offline'),
-                        {'system': {'func_list': None}}):
+                        {'response_code': 0, 'system': {'func_list': None}}):
             with self.subTest(failure=failure):
                 api = REMOTE['YamahaApi']('127.0.0.1')
-                api._get_json = Mock(side_effect=[failure, {'system': {'func_list': ['speaker_a']}}])
-                with self.assertRaises(REMOTE['DeviceConnectionError'] if isinstance(failure, Exception)
-                                       else REMOTE['DeviceResponseError']):
-                    api.get_speaker_outputs()
-                self.assertEqual(api.get_speaker_outputs(), ('a',))
-                self.assertEqual(api.get_speaker_outputs(), ('a',))
-                self.assertEqual(api._get_json.call_count, 2)
+                good = {'response_code': 0, 'system': {'func_list': ['speaker_a'], 'input_list': []}}
+                opener = MagicMock()
+                with patch.dict(GLOBALS, DEVICE_HTTP_OPENER=opener):
+                    if isinstance(failure, Exception):
+                        opener.open.side_effect = failure
+                    else:
+                        opener.open.return_value.__enter__.return_value.read.return_value = json.dumps(failure).encode()
+                    with self.assertRaises(REMOTE['DeviceConnectionError'] if isinstance(failure, Exception)
+                                           else REMOTE['DeviceResponseError']):
+                        api.get_speaker_outputs()
+                    self.assertIsNone(api._features)
+                    opener.open.side_effect = None
+                    opener.open.return_value.__enter__.return_value.read.return_value = json.dumps(good).encode()
+                    self.assertEqual(api.get_speaker_outputs(), ('a',))
+                    self.assertEqual(api.get_speaker_outputs(), ('a',))
+                    self.assertEqual(opener.open.call_count, 2)
 
     def test_unsupported_capabilities_are_cached_only_for_that_api_instance(self):
         first = REMOTE['YamahaApi']('127.0.0.1')
-        first._get_json = Mock(return_value={'system': {}})
+        first._get_json = Mock(return_value={'system': {'input_list': []}})
         self.assertEqual(first.get_speaker_outputs(), ())
         self.assertEqual(first.get_speaker_outputs(), ())
         first._get_json.assert_called_once_with('system/getFeatures')
         second = REMOTE['YamahaApi']('127.0.0.1')
-        second._get_json = Mock(return_value={'system': {'func_list': ['speaker_a']}})
+        second._get_json = Mock(return_value={'system': {'func_list': ['speaker_a'], 'input_list': []}})
         self.assertEqual(second.get_speaker_outputs(), ('a',))
         second._get_json.assert_called_once_with('system/getFeatures')
 
     def test_invalid_capabilities_and_boolean_states_are_rejected(self):
-        api = self.api(SpeakerDevice())
-        for system in (None, [], {'func_list': None}):
-            api._get_json = Mock(return_value={'system': system})
-            with self.assertRaises(REMOTE['DeviceResponseError']):
-                api.get_speaker_outputs()
-        for state in ({}, {'speaker_a': 1}, {'speaker_a': 'false'}):
-            api._get_json = Mock(return_value=state)
-            with self.assertRaises(REMOTE['DeviceResponseError']):
-                api.get_speaker_state(('a',))
+        api = REMOTE['YamahaApi']('127.0.0.1')
+        opener = MagicMock()
+        with patch.dict(GLOBALS, DEVICE_HTTP_OPENER=opener):
+            reply = opener.open.return_value.__enter__.return_value
+            for system in (None, [], {'func_list': None}):
+                reply.read.return_value = json.dumps({'response_code': 0, 'system': system}).encode()
+                with self.assertRaises(REMOTE['DeviceResponseError']):
+                    api.get_speaker_outputs()
+            for state in ({}, {'speaker_a': 1}, {'speaker_a': 'false'}):
+                reply.read.return_value = json.dumps(dict(response_code=0, **state)).encode()
+                with self.assertRaises(REMOTE['DeviceResponseError']):
+                    api.get_speaker_state(('a',))
 
     def test_switch_a_to_b_verifies_off_before_enabling_b(self):
         device = SpeakerDevice()
