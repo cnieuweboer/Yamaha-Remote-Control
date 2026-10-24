@@ -14,7 +14,7 @@ import threading
 import traceback
 import tempfile
 from collections import deque
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -506,7 +506,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.22.2"
+__version__ = "2026.10.24.1"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -553,6 +553,8 @@ DEFAULT_CONFIG = {
     "DarkMode": True,
     "Mica": False,
     "VolumeDb": False,
+    "GlobalDefaultVolume": "",
+    "StartupDefaultVolume": False,
     "VolumeDbAtZero": -97.0,
     "VolumeDbStepSize": 0.5,
     "GlobalShortcuts": {"VolumeUp": [], "VolumeDown": [], "Mute": []},
@@ -567,7 +569,7 @@ DEFAULT_CONFIG = {
 
 BOOLEAN_CONFIG_KEYS = (
     "DiagnosticsEnabled", "SortByName", "DarkMode", "Mica",
-    "SystemTray", "CloseToTray", "VolumeDb", "DropdownAnimationWorkaround",
+    "SystemTray", "CloseToTray", "VolumeDb", "DropdownAnimationWorkaround", "StartupDefaultVolume",
 )
 
 
@@ -600,6 +602,38 @@ def _validate_number(value, key):
         )
 
     return value
+
+
+def _validate_default_volume(value, key):
+    if value == "" or value is False:
+        return value
+    if type(value) is int and value >= 0:
+        return value
+    if isinstance(value, str) and re.fullmatch(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s*dB", value.strip(), re.IGNORECASE):
+        _validate_number(float(value.strip()[:-2]), key)
+        return value.strip()
+    raise ConfigError(f'{key} must be a non-negative raw integer, a dB string, "", or false.')
+
+
+def _default_volume_raw(value, config):
+    if value == "" or value is False:
+        return None
+    if isinstance(value, str):
+        raw = ((Decimal(value[:-2].strip()) - Decimal(str(config["VolumeDbAtZero"])))
+               / Decimal(str(config["VolumeDbStepSize"])))
+        if not raw.is_finite() or raw < 0:
+            raise ConfigError("Default volume is below the amplifier raw minimum (0) or cannot be converted.")
+        return int(raw.to_integral_value(rounding=ROUND_HALF_UP))
+    return value
+
+
+def _validate_default_volumes(config, maximum=None):
+    entries = [("GlobalDefaultVolume", config["GlobalDefaultVolume"])]
+    entries.extend((f"Inputs.{key}.DefaultVolume", item["DefaultVolume"]) for key, item in config["Inputs"].items())
+    for key, value in entries:
+        target = _default_volume_raw(value, config)
+        if target is not None and maximum is not None and target > maximum:
+            raise ConfigError(f"{key} resolves to raw volume {target}, above the API maximum {maximum}.")
 
 
 def _validate_host(value):
@@ -672,6 +706,7 @@ def _validate_entries(value, collection):
             "Hidden",
             "Favorite",
             "Removed",
+            "DefaultVolume",
         }
 
         if unknown_keys:
@@ -720,6 +755,7 @@ def _validate_entries(value, collection):
             "Hidden": hidden,
             "Favorite": favorite,
             "Removed": removed,
+            "DefaultVolume": _validate_default_volume(settings.get("DefaultVolume", ""), f"Inputs.{input_id}.DefaultVolume"),
         }
 
     return normalized
@@ -869,6 +905,13 @@ def validate_config(raw_config, *, allow_incomplete=False):
         )
 
     config["Inputs"] = _validate_entries(config.get("Inputs", {}), "Inputs")
+    config["GlobalDefaultVolume"] = _validate_default_volume(config["GlobalDefaultVolume"], "GlobalDefaultVolume")
+    defaults = [config["GlobalDefaultVolume"], *(item["DefaultVolume"] for item in config["Inputs"].values())]
+    if any(isinstance(value, str) and value for value in defaults):
+        for key in ("VolumeDbAtZero", "VolumeDbStepSize"):
+            if key not in raw_config:
+                raise ConfigError(f'{key} is required for default volumes specified in dB.')
+    _validate_default_volumes(config)
 
     if not allow_incomplete and missing_config_settings(config):
         raise ConfigError('"Host" must not be empty.')
@@ -904,10 +947,16 @@ def load_config():
     collections = ("Apps", "Inputs") if "Apps" in config else ("Inputs",)
     missing_removed = any("Removed" not in item for collection in collections
                           for item in raw_config.get(collection, {}).values())
-    if ("Shortcuts" not in raw_config or set(DEFAULT_SHORTCUTS) - set(raw_config["Shortcuts"])
+    missing_defaults = ("GlobalDefaultVolume" not in raw_config or "StartupDefaultVolume" not in raw_config
+                        or any("DefaultVolume" not in item for item in raw_config.get("Inputs", {}).values()))
+    if (missing_defaults or "Shortcuts" not in raw_config or set(DEFAULT_SHORTCUTS) - set(raw_config["Shortcuts"])
             or "GlobalShortcuts" not in raw_config or "GlobalVolumeHotkeys" in raw_config
             or set(DEFAULT_CONFIG["GlobalShortcuts"]) - set(raw_config["GlobalShortcuts"]) or missing_removed):
         updated = dict(raw_config)
+        if missing_defaults:
+            updated["GlobalDefaultVolume"] = config["GlobalDefaultVolume"]
+            updated["StartupDefaultVolume"] = config["StartupDefaultVolume"]
+            updated["Inputs"] = config["Inputs"]
         updated["Shortcuts"] = config["Shortcuts"]
         updated["GlobalShortcuts"] = config["GlobalShortcuts"]
         updated.pop("GlobalVolumeHotkeys", None)
@@ -1717,6 +1766,9 @@ class YamahaApi:
         self._get_json(
             "main/setVolume?volume=down"
         )
+
+    def set_volume(self, volume):
+        self._get_json(f"main/setVolume?volume={volume}")
 
     def set_input(self, input_id):
         status = self.get_status()
@@ -2591,6 +2643,9 @@ class YamahaRemote(QWidget):
         self.action_running = False
         self._volume_batch_count = 0
         self.last_status = None
+        self._default_volume_previous = None
+        self._default_volume_error = None
+        self._default_volume_validated_maximum = None
         self.inputs = []
         self._speaker_outputs = None
         self._speaker_discovery_running = False
@@ -2647,6 +2702,7 @@ class YamahaRemote(QWidget):
         return state
 
     def _calibration_changed(self, active):
+        self._default_volume_previous = None
         self._volume_batch_count = 0
         self.calibration_active = active
         self.setEnabled(not active)
@@ -3083,7 +3139,7 @@ class YamahaRemote(QWidget):
                 settings = self.input_settings.get(input_id)
                 if settings is None:
                     self.input_settings[input_id] = {"Name": name, "NameOverride": "",
-                        "Hidden": False, "Favorite": False, "Removed": False}
+                        "Hidden": False, "Favorite": False, "Removed": False, "DefaultVolume": ""}
                     config_changed = True
                 elif settings["Name"] != name:
                     settings["Name"] = name
@@ -3279,6 +3335,7 @@ class YamahaRemote(QWidget):
                 self._publish_hotkey_state()
                 self.show_cached_status()
                 self.polling.observed("main", observed_at)
+                self._apply_default_volume(status)
             if speaker_error is not None:
                 self._speaker_read_failed(speaker_error)
             elif speaker_state is not None:
@@ -3296,11 +3353,48 @@ class YamahaRemote(QWidget):
             self.discovery.tick()
 
         def failed(error):
+            self._default_volume_previous = None
             self.poll_running = False
             self.handle_request_error(error, background=True)
 
         self.run_worker(query, on_result=done, on_error=failed,
                         on_finished=self.polling.finished, request_group="status")
+
+    def _apply_default_volume(self, status):
+        previous = self._default_volume_previous
+        power, input_id = status.get("power"), status.get("input")
+        self._default_volume_previous = ((power, input_id) if power == "standby" or
+                                         (power == "on" and isinstance(input_id, str) and input_id) else None)
+        if self.calibration_active or self._shutting_down:
+            self._default_volume_previous = None
+            return
+        if power != "on":
+            return
+        maximum = status.get("max_volume")
+        if type(maximum) is not int or maximum < 0:
+            self._default_volume_previous = None
+            return
+        if self._default_volume_validated_maximum != maximum:
+            self._default_volume_validated_maximum = maximum
+            try:
+                _validate_default_volumes(self.config, maximum)
+            except ConfigError as error:
+                self._default_volume_error = str(error)
+                self.show_error("Default volume was not applied:\n" + self._default_volume_error)
+            else:
+                self._default_volume_error = None
+        if self._default_volume_error or previous is None or not self._default_volume_previous:
+            return
+        input_changed = previous[0] == "on" and previous[1] != input_id
+        powered_on = previous[0] == "standby" and self.config["StartupDefaultVolume"]
+        if not (input_changed or powered_on):
+            return
+        value = self.config["Inputs"].get(input_id, {}).get("DefaultVolume", "")
+        if value == "":
+            value = self.config["GlobalDefaultVolume"]
+        target = _default_volume_raw(value, self.config)
+        if target is not None and status.get("volume") != target:
+            self.run_action(lambda: self.api.set_volume(target), background=True, refresh_groups={"main"})
 
     def _request_poll(self, delay_ms=0, groups=None):
         self.polling.request(delay_ms, groups)
@@ -3359,6 +3453,7 @@ class YamahaRemote(QWidget):
         QMessageBox.warning(self, "Yamaha Remote", message)
 
     def set_offline(self):
+        self._default_volume_previous = None
         self.polling.invalidate()
         self.clear_startup_status()
         self.connected = False
@@ -3374,6 +3469,7 @@ class YamahaRemote(QWidget):
         self.set_controls_enabled(False)
 
     def set_error_status(self):
+        self._default_volume_previous = None
         self.polling.invalidate()
         self.clear_startup_status()
         self.connected = False
@@ -3829,7 +3925,10 @@ class YamahaRemote(QWidget):
 
         try:
             raw_config = json.loads(content.decode("utf-8"))
-            validate_config(raw_config)
+            candidate = validate_config(raw_config)
+            maximum = (self.last_status or {}).get("max_volume")
+            if self.connected and type(maximum) is int and maximum >= 0:
+                _validate_default_volumes(candidate, maximum)
         except (OSError, ValueError) as ex:
             if new_hash != self._invalid_config_digest:
                 self._invalid_config_digest = new_hash
@@ -3929,6 +4028,8 @@ class YamahaRemote(QWidget):
                          "focused_volume_contexts": len(server.focused_volume) if server else 0}
         report["routing"] = {"volume_destination": "amplifier", "input": status.get("input"),
                              "global_eligible": self._volume_hotkeys_eligible()}
+        report["input_default_volume"] = {"previous_confirmed_state": self._default_volume_previous,
+            "configuration_error": self._default_volume_error, "startup_enabled": self.config["StartupDefaultVolume"]}
         report["volume_commands"] = {"action_running": self.action_running,
                                      "batch_count": self._volume_batch_count, "pending_count": pending}
         return report

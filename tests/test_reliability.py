@@ -104,7 +104,7 @@ class ConfigSnapshotTests(unittest.TestCase):
 
     def remote(self):
         self.restarts = []
-        return SimpleNamespace(calibration_active=False, _shutting_down=False, _config_restart_pending=False,
+        return SimpleNamespace(last_status=None, connected=False, calibration_active=False, _shutting_down=False, _config_restart_pending=False,
                                _config_digest=b'previous', _invalid_config_digest=None,
                                _reload_volume_mapping=lambda: None, _watch_config_paths=lambda: None,
                                _restart_for_config_change=lambda: self.restarts.append(True))
@@ -245,7 +245,7 @@ class DiscoverySaveTests(unittest.TestCase):
         self.path.write_bytes(self.original)
         self.baseline = hashlib.sha256(self.original).digest()
         self.remote = SimpleNamespace(
-            config=self.config, _config_digest=self.baseline, _restart_failed=False,
+            last_status=None, connected=False, config=self.config, _config_digest=self.baseline, _restart_failed=False,
             _watch_config_paths=Mock(), _shutting_down=False, calibration_active=False,
             _config_restart_pending=False, _invalid_config_digest=None,
             _reload_volume_mapping=Mock(), _restart_for_config_change=Mock(),

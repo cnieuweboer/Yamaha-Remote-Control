@@ -26,5 +26,7 @@
     "VolumeUp": [],
     "VolumeDown": [],
     "Mute": []
-  }
+  },
+  "GlobalDefaultVolume": "",
+  "StartupDefaultVolume": false
 }

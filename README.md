@@ -119,3 +119,9 @@ Run `python YamahaRemote.pyw --dump-state` while the remote is running to save a
 Use `--dump-state-full` instead to include the last successful decoded response for each polling request, with its timestamp and age. It still makes no fresh queries; full reports may include device/network identifiers and app inventories, so review them before sharing.
 
 Both reports also include session-only polling counters for successes, empty inventories, failures and recoveries; these reset when the remote restarts.
+
+### Default volume per input
+
+Set an input’s `DefaultVolume` to a raw integer (for example `96`) or a dB string (`"-51.5 dB"`); dB values use `VolumeDbAtZero` and `VolumeDbStepSize`, regardless of the display mode. `""` inherits top-level `GlobalDefaultVolume`, while `false` opts that input out; an empty global default makes no change.
+
+Defaults apply once after a confirmed input change while on. Set `StartupDefaultVolume` to `true` to also apply after a confirmed standby-to-on transition; initial connection/reconnection and calibration never apply defaults. Targets must fit the reported API range, mute is preserved, and audio may briefly play at the previous volume before detection—this is not a safety limit.

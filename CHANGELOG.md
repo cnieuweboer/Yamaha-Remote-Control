@@ -2,6 +2,10 @@
 
 Release identifiers below come from the corresponding commits. Some releases updated only the calibration helper; the remote and helper can therefore have different version numbers. Historical behavior may have been superseded by later releases.
 
+## 2026-10-24
+
+- Yamaha Remote 2026.10.24.1 — Add input DefaultVolume presets, GlobalDefaultVolume inheritance, explicit per-input opt-out and StartupDefaultVolume for confirmed standby-to-on transitions. Accept raw integers/dB strings with conversion and API-range validation. Preserve mute, skip initial/reconnections and calibration, and reuse serialized commands/status polling.
+
 ## 2026-10-22
 
 - Yamaha Remote 2026.10.22.2 — Show overlapping focused/global bindings only as global shortcuts in button tooltips; retain distinct focused bindings. Shortcut handling is unchanged.
