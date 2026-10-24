@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import runpy
 import tempfile
+import time
 import unittest
 from unittest.mock import Mock, patch
 
@@ -58,6 +59,18 @@ class ConfigurationTests(unittest.TestCase):
             self.assertEqual(saved['Inputs']['tv']['DefaultVolume'], '')
             self.assertTrue(saved['Inputs']['tv']['Favorite'])
 
+    def test_optional_recheck_suffix_and_raw_string_without_db_settings(self):
+        for value, target, delay in (('93 +2', 93, 2.0), ('-51.5 dB +1.5', 91, 1.5),
+                                      ('-51.5dB+.25', 91, .25), ('93 +0', 93, 0.0)):
+            config = self.config(GlobalDefaultVolume=value)
+            self.assertEqual(R['_default_volume_raw'](value, config), target)
+            self.assertEqual(R['_default_volume_parts'](value)[1], delay)
+        config = R['validate_config']({'GlobalDefaultVolume': '93 +2'}, allow_incomplete=True)
+        self.assertEqual(R['_default_volume_raw']('93 +2', config), 93)
+        for value in ('93 +-2', '-51dB +NaN', '93 +1 +2', '93 +999999999999', '-1 +2', '93.5 +2'):
+            with self.subTest(value=value), self.assertRaises(R['ConfigError']):
+                self.config(GlobalDefaultVolume=value)
+
 class TransitionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -73,10 +86,10 @@ class TransitionTests(unittest.TestCase):
         self.w.api.set_volume = Mock()
         self.w.show_error = Mock()
 
-    def observe(self, power='on', input='tv', **changes):
+    def observe(self, power='on', input='tv', request_started_at=None, **changes):
         status = dict(power=power, input=input, volume=20, max_volume=154, mute=True)
         status.update(changes)
-        self.w._apply_default_volume(status)
+        self.w._apply_default_volume(status, request_started_at=request_started_at)
         return status
 
     def assert_target(self, target):
@@ -188,3 +201,122 @@ class TransitionTests(unittest.TestCase):
         self.w.api.get_status.return_value = status('pc')
         self.w.poll_status(groups={'main'})
         self.w.run_action.assert_not_called()
+
+    def arm_recheck(self, value='80 +2'):
+        self.w.config['Inputs']['tv']['DefaultVolume'] = value
+        self.observe(input='pc')
+        self.w.run_action.reset_mock()
+        self.observe(input='tv')
+        return self.w._default_volume_recheck['deadline']
+
+    def test_immediate_then_one_changed_volume_reapply_from_fresh_request(self):
+        deadline = self.arm_recheck()
+        self.assertEqual(self.w.run_action.call_count, 1)
+        self.observe(volume=60, request_started_at=deadline - .1)
+        self.assertEqual(self.w.run_action.call_count, 1)
+        self.observe(volume=60, request_started_at=deadline)
+        self.assertEqual(self.w.run_action.call_count, 2)
+        self.w.run_action.call_args.args[0]()
+        self.w.api.set_volume.assert_called_once_with(80)
+        self.assertIsNone(self.w._default_volume_recheck)
+        self.assertFalse(self.w.default_volume_timer.isActive())
+        self.observe(volume=60, request_started_at=deadline + 1)
+        self.assertEqual(self.w.run_action.call_count, 2)
+
+    def test_unchanged_volume_needs_no_second_command(self):
+        deadline = self.arm_recheck()
+        self.observe(volume=80, request_started_at=deadline)
+        self.assertEqual(self.w.run_action.call_count, 1)
+        self.assertIsNone(self.w._default_volume_recheck)
+
+    def test_already_matching_initial_volume_still_gets_one_delayed_check(self):
+        self.w.config['Inputs']['tv']['DefaultVolume'] = '80 +2'
+        self.observe(input='pc')
+        self.observe(volume=80)
+        self.w.run_action.assert_not_called()
+        deadline = self.w._default_volume_recheck['deadline']
+        self.observe(volume=60, request_started_at=deadline)
+        self.assert_target(80)
+
+    def test_timer_requests_fresh_main_status_once(self):
+        from PySide6.QtTest import QTest
+        self.w.connected = True
+        self.w.last_status = dict(power='on', input='tv', volume=80, max_volume=154, mute=False)
+        self.w._request_poll = Mock()
+        self.w.polling.allowed = Mock(return_value=True)
+        self.arm_recheck('80 +0.03')
+        QTest.qWait(80)
+        self.w._request_poll.assert_called_once_with(groups={'main'})
+        self.observe(volume=60, request_started_at=time.monotonic())
+        self.assertEqual(self.w.run_action.call_count, 2)
+
+    def test_explicit_controls_cancel_recheck(self):
+        for command in (lambda: self.w.adjust_volume(1), lambda: self.w.toggle_mute()):
+            self.arm_recheck()
+            self.w.last_status = dict(power='on', input='tv', volume=80, max_volume=154, mute=False)
+            command()
+            self.assertIsNone(self.w._default_volume_recheck)
+            self.assertFalse(self.w.default_volume_timer.isActive())
+
+    def test_queued_native_command_cancels_without_touching_timer_on_hook_thread(self):
+        self.arm_recheck()
+        self.w._pending_hotkeys.append('volume_up')
+        self.w._request_poll = Mock()
+        self.w._request_default_volume_recheck()
+        self.w._request_poll.assert_not_called()
+        self.assertIsNone(self.w._default_volume_recheck)
+
+    def test_accepted_ipc_volume_command_cancels_before_queue_drains(self):
+        self.arm_recheck()
+        self.w._volume_hotkeys_eligible = Mock(return_value=True)
+        self.w.last_status = {'input': 'tv'}
+        self.assertTrue(self.w._accept_ipc_command('volume_up', 'tv')[0])
+        self.assertIsNone(self.w._default_volume_recheck)
+
+    def test_state_change_and_calibration_cancel_pending_recheck(self):
+        self.arm_recheck()
+        self.observe('standby')
+        self.assertIsNone(self.w._default_volume_recheck)
+        self.arm_recheck()
+        self.observe(input='disabled')
+        self.assertIsNone(self.w._default_volume_recheck)
+        self.arm_recheck()
+        self.w.set_offline()
+        self.assertIsNone(self.w._default_volume_recheck)
+        self.arm_recheck()
+        self.w._calibration_changed(True)
+        self.assertIsNone(self.w._default_volume_recheck)
+
+    def test_failed_immediate_command_cancels_followup(self):
+        self.arm_recheck()
+        failed = self.w.run_action.call_args.kwargs['on_error']
+        self.w.handle_request_error = Mock()
+        failed(R['DeviceResponseError']('failed'))
+        self.assertIsNone(self.w._default_volume_recheck)
+        self.w.handle_request_error.assert_called_once()
+
+    def test_plain_default_does_not_schedule_recheck(self):
+        self.observe(input='pc')
+        self.observe(input='tv')
+        self.assertIsNone(self.w._default_volume_recheck)
+        self.assertFalse(self.w.default_volume_timer.isActive())
+
+    def test_native_intent_cancels_even_if_queue_has_already_been_discarded(self):
+        self.arm_recheck()
+        with self.w._hotkey_lock:
+            self.w._enqueue_hotkey_locked('volume_up')
+            self.w._pending_hotkeys.clear()
+        self.w._request_poll = Mock()
+        self.w._request_default_volume_recheck()
+        self.w._request_poll.assert_not_called()
+        self.assertIsNone(self.w._default_volume_recheck)
+
+    def test_suspended_polling_cancels_instead_of_enforcing_hours_later(self):
+        self.arm_recheck()
+        self.w.connected = True
+        self.w.last_status = dict(power='on', input='tv')
+        self.w.polling.allowed = Mock(return_value=False)
+        self.w._request_poll = Mock()
+        self.w._request_default_volume_recheck()
+        self.assertIsNone(self.w._default_volume_recheck)
+        self.w._request_poll.assert_not_called()

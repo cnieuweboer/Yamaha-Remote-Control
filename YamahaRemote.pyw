@@ -506,7 +506,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.24.1"
+__version__ = "2026.10.24.2"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -604,18 +604,32 @@ def _validate_number(value, key):
     return value
 
 
+def _default_volume_parts(value, key="DefaultVolume"):
+    if value == "" or value is False or (type(value) is int and value >= 0):
+        return value, 0.0
+    if isinstance(value, str):
+        match = re.fullmatch(r"([+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))\s*(dB)?(?:\s*\+\s*([0-9]+(?:\.[0-9]*)?|\.[0-9]+))?",
+                             value.strip(), re.IGNORECASE)
+        if match:
+            number, unit, delay = match.groups()
+            seconds = float(delay) if delay is not None else 0.0
+            if not math.isfinite(seconds) or seconds > 2147483:
+                raise ConfigError(f"{key}: recheck delay exceeds the supported timer range.")
+            if unit:
+                _validate_number(float(number), key)
+                return number + " dB", seconds
+            if delay is not None and number.isascii() and number.isdigit():
+                return int(number), seconds
+    raise ConfigError(f'{key} must be a non-negative raw integer, a dB string, "", or false; strings may add +seconds.')
+
+
 def _validate_default_volume(value, key):
-    if value == "" or value is False:
-        return value
-    if type(value) is int and value >= 0:
-        return value
-    if isinstance(value, str) and re.fullmatch(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s*dB", value.strip(), re.IGNORECASE):
-        _validate_number(float(value.strip()[:-2]), key)
-        return value.strip()
-    raise ConfigError(f'{key} must be a non-negative raw integer, a dB string, "", or false.')
+    _default_volume_parts(value, key)
+    return value.strip() if isinstance(value, str) else value
 
 
 def _default_volume_raw(value, config):
+    value, _ = _default_volume_parts(value)
     if value == "" or value is False:
         return None
     if isinstance(value, str):
@@ -907,7 +921,7 @@ def validate_config(raw_config, *, allow_incomplete=False):
     config["Inputs"] = _validate_entries(config.get("Inputs", {}), "Inputs")
     config["GlobalDefaultVolume"] = _validate_default_volume(config["GlobalDefaultVolume"], "GlobalDefaultVolume")
     defaults = [config["GlobalDefaultVolume"], *(item["DefaultVolume"] for item in config["Inputs"].values())]
-    if any(isinstance(value, str) and value for value in defaults):
+    if any(isinstance(_default_volume_parts(value)[0], str) and value for value in defaults):
         for key in ("VolumeDbAtZero", "VolumeDbStepSize"):
             if key not in raw_config:
                 raise ConfigError(f'{key} is required for default volumes specified in dB.')
@@ -2644,6 +2658,7 @@ class YamahaRemote(QWidget):
         self._volume_batch_count = 0
         self.last_status = None
         self._default_volume_previous = None
+        self._default_volume_recheck = None
         self._default_volume_error = None
         self._default_volume_validated_maximum = None
         self.inputs = []
@@ -2662,6 +2677,7 @@ class YamahaRemote(QWidget):
         self._last_status_at = None
         self._hotkey_lock = threading.Lock()
         self._pending_hotkeys = deque()
+        self._volume_intent_generation = 0
         self._hotkey_drain_scheduled = False
         self._hotkey_state_refresh_pending = False
         self._hotkey_state = (False, 0, None, False)
@@ -2702,6 +2718,7 @@ class YamahaRemote(QWidget):
         return state
 
     def _calibration_changed(self, active):
+        self._cancel_default_volume_recheck()
         self._default_volume_previous = None
         self._volume_batch_count = 0
         self.calibration_active = active
@@ -2772,6 +2789,10 @@ class YamahaRemote(QWidget):
         ready()
 
     def _setup_timers(self):
+        self.default_volume_timer = QTimer(self)
+        self.default_volume_timer.setSingleShot(True)
+        self.default_volume_timer.setTimerType(Qt.PreciseTimer)
+        self.default_volume_timer.timeout.connect(self._request_default_volume_recheck)
         self.polling = PollingCoordinator(self)
         self.poll_timer = self.polling.periodic
 
@@ -3308,9 +3329,11 @@ class YamahaRemote(QWidget):
         speaker_state = speaker_error = speaker_observed_at = None
         outputs = self._speaker_outputs
         cached_status = self.last_status
+        request_started_at = None
         def query():
-            nonlocal speaker_state, speaker_error, speaker_observed_at
+            nonlocal speaker_state, speaker_error, speaker_observed_at, request_started_at
             read_main = "main" in groups or cached_status is None
+            request_started_at = time.monotonic() if read_main else None
             status = self.api.get_status() if read_main else cached_status
             observed_at = time.monotonic() if read_main else None
             if "speakers" in groups and outputs and status.get("power") == "on":
@@ -3335,7 +3358,7 @@ class YamahaRemote(QWidget):
                 self._publish_hotkey_state()
                 self.show_cached_status()
                 self.polling.observed("main", observed_at)
-                self._apply_default_volume(status)
+                self._apply_default_volume(status, request_started_at=request_started_at)
             if speaker_error is not None:
                 self._speaker_read_failed(speaker_error)
             elif speaker_state is not None:
@@ -3353,6 +3376,7 @@ class YamahaRemote(QWidget):
             self.discovery.tick()
 
         def failed(error):
+            self._cancel_default_volume_recheck()
             self._default_volume_previous = None
             self.poll_running = False
             self.handle_request_error(error, background=True)
@@ -3360,18 +3384,23 @@ class YamahaRemote(QWidget):
         self.run_worker(query, on_result=done, on_error=failed,
                         on_finished=self.polling.finished, request_group="status")
 
-    def _apply_default_volume(self, status):
+    def _apply_default_volume(self, status, *, request_started_at=None):
         previous = self._default_volume_previous
         power, input_id = status.get("power"), status.get("input")
         self._default_volume_previous = ((power, input_id) if power == "standby" or
                                          (power == "on" and isinstance(input_id, str) and input_id) else None)
+        pending = self._default_volume_recheck
+        if pending and (power != "on" or input_id != pending["input"]):
+            self._cancel_default_volume_recheck()
         if self.calibration_active or self._shutting_down:
+            self._cancel_default_volume_recheck()
             self._default_volume_previous = None
             return
         if power != "on":
             return
         maximum = status.get("max_volume")
         if type(maximum) is not int or maximum < 0:
+            self._cancel_default_volume_recheck()
             self._default_volume_previous = None
             return
         if self._default_volume_validated_maximum != maximum:
@@ -3383,7 +3412,21 @@ class YamahaRemote(QWidget):
                 self.show_error("Default volume was not applied:\n" + self._default_volume_error)
             else:
                 self._default_volume_error = None
-        if self._default_volume_error or previous is None or not self._default_volume_previous:
+        if self._default_volume_error:
+            self._cancel_default_volume_recheck()
+            return
+        pending = self._default_volume_recheck
+        if pending:
+            with self._hotkey_lock:
+                manual_pending = (bool(self._pending_hotkeys)
+                                  or self._volume_intent_generation != pending["intent_generation"])
+            if manual_pending:
+                self._cancel_default_volume_recheck()
+            elif request_started_at is not None and request_started_at >= pending["deadline"]:
+                self._cancel_default_volume_recheck()
+                if type(status.get("volume")) is int and status["volume"] != pending["target"]:
+                    self.run_action(lambda: self.api.set_volume(pending["target"]), background=True, refresh_groups={"main"})
+        if previous is None or not self._default_volume_previous:
             return
         input_changed = previous[0] == "on" and previous[1] != input_id
         powered_on = previous[0] == "standby" and self.config["StartupDefaultVolume"]
@@ -3393,8 +3436,40 @@ class YamahaRemote(QWidget):
         if value == "":
             value = self.config["GlobalDefaultVolume"]
         target = _default_volume_raw(value, self.config)
-        if target is not None and status.get("volume") != target:
-            self.run_action(lambda: self.api.set_volume(target), background=True, refresh_groups={"main"})
+        self._cancel_default_volume_recheck()
+        if target is None:
+            return
+        with self._hotkey_lock:
+            intent_generation = self._volume_intent_generation
+        accepted = (status.get("volume") == target or self.run_action(
+            lambda: self.api.set_volume(target), background=True, refresh_groups={"main"},
+            on_error=self._default_volume_command_failed))
+        _, delay = _default_volume_parts(value)
+        if accepted and delay > 0:
+            self._default_volume_recheck = {"input": input_id, "target": target,
+                                            "deadline": time.monotonic() + delay, "intent_generation": intent_generation}
+            self.default_volume_timer.start(math.ceil(delay * 1000))
+
+    def _default_volume_command_failed(self, error):
+        self._cancel_default_volume_recheck()
+        self.handle_request_error(error, background=True, command=True)
+
+    def _cancel_default_volume_recheck(self):
+        self._default_volume_recheck = None
+        self.default_volume_timer.stop()
+
+    def _request_default_volume_recheck(self):
+        pending = self._default_volume_recheck
+        status = self.last_status or {}
+        with self._hotkey_lock:
+            manual_pending = (bool(self._pending_hotkeys) or
+                              (pending is not None and self._volume_intent_generation != pending["intent_generation"]))
+        if (pending is None or manual_pending or self._shutting_down or self.calibration_active
+                or not self.connected or not self.polling.allowed()
+                or status.get("power") != "on" or status.get("input") != pending["input"]):
+            self._cancel_default_volume_recheck()
+            return
+        self._request_poll(groups={"main"})
 
     def _request_poll(self, delay_ms=0, groups=None):
         self.polling.request(delay_ms, groups)
@@ -3453,6 +3528,7 @@ class YamahaRemote(QWidget):
         QMessageBox.warning(self, "Yamaha Remote", message)
 
     def set_offline(self):
+        self._cancel_default_volume_recheck()
         self._default_volume_previous = None
         self.polling.invalidate()
         self.clear_startup_status()
@@ -3469,6 +3545,7 @@ class YamahaRemote(QWidget):
         self.set_controls_enabled(False)
 
     def set_error_status(self):
+        self._cancel_default_volume_recheck()
         self._default_volume_previous = None
         self.polling.invalidate()
         self.clear_startup_status()
@@ -3549,6 +3626,7 @@ class YamahaRemote(QWidget):
         self.run_action(action)
 
     def toggle_mute(self, *, background=False):
+        self._cancel_default_volume_recheck()
         if not self.last_status:
             return
 
@@ -3561,6 +3639,7 @@ class YamahaRemote(QWidget):
             self.show_cached_status()
 
     def adjust_volume(self, direction, *, background=False, batch_volume=False):
+        self._cancel_default_volume_recheck()
         if not self.last_status:
             return
 
@@ -3654,6 +3733,7 @@ class YamahaRemote(QWidget):
                 or self.last_status.get("input") != expected_input
                 or QApplication.activeModalWidget() is not None):
             return False, "state_changed"
+        self._cancel_default_volume_recheck()
         with self._hotkey_lock:
             accepted = self._enqueue_hotkey_locked((command, expected_input))
             return accepted, "" if accepted else "queue_full"
@@ -3765,7 +3845,10 @@ class YamahaRemote(QWidget):
 
     def _enqueue_hotkey_locked(self, command):
         key_command = command[0] if isinstance(command, tuple) else command
-        if key_command not in _VOLUME_KEYS.values() or len(self._pending_hotkeys) >= MAX_PENDING_HOTKEYS:
+        if key_command not in _VOLUME_KEYS.values():
+            return False
+        self._volume_intent_generation += 1
+        if len(self._pending_hotkeys) >= MAX_PENDING_HOTKEYS:
             return False
         self._pending_hotkeys.append(command)
         if not self._hotkey_drain_scheduled:
@@ -4029,7 +4112,10 @@ class YamahaRemote(QWidget):
         report["routing"] = {"volume_destination": "amplifier", "input": status.get("input"),
                              "global_eligible": self._volume_hotkeys_eligible()}
         report["input_default_volume"] = {"previous_confirmed_state": self._default_volume_previous,
-            "configuration_error": self._default_volume_error, "startup_enabled": self.config["StartupDefaultVolume"]}
+            "configuration_error": self._default_volume_error, "startup_enabled": self.config["StartupDefaultVolume"],
+            "recheck": ({"input": self._default_volume_recheck["input"], "target": self._default_volume_recheck["target"],
+                         "remaining_seconds": max(0.0, self._default_volume_recheck["deadline"] - now)}
+                        if self._default_volume_recheck else None)}
         report["volume_commands"] = {"action_running": self.action_running,
                                      "batch_count": self._volume_batch_count, "pending_count": pending}
         return report
@@ -4100,6 +4186,7 @@ class YamahaRemote(QWidget):
         self.close()
 
     def _pause_background_work(self):
+        self._cancel_default_volume_recheck()
         self._volume_batch_count = 0
         self._shutting_down = True
         self.discovery.pause()
