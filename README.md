@@ -122,8 +122,20 @@ Both reports also include session-only polling counters for successes, empty inv
 
 ### Default volume per input
 
-Set an input’s `DefaultVolume` to a raw integer (for example `96`) or a dB string (`"-51.5 dB"`); dB values use `VolumeDbAtZero` and `VolumeDbStepSize`, regardless of the display mode. `""` inherits top-level `GlobalDefaultVolume`, while `false` opts that input out; an empty global default makes no change.
-
-Defaults apply once after a confirmed input change while on. Set `StartupDefaultVolume` to `true` to also apply after a confirmed standby-to-on transition; initial connection/reconnection and calibration never apply defaults. Targets must fit the reported API range, mute is preserved, and audio may briefly play at the previous volume before detection—this is not a safety limit.
-
-Optionally append `+seconds` to a default-volume string, such as `"-50.5 dB +2"` or `"93 +2"`: apply immediately, then check fresh status after the delay and reapply once if needed. The check cancels on state/connection changes, calibration, suspended polling or volume/mute commands through either remote; physical-remote changes can be mistaken for CEC and overwritten during that interval.
+- Set `DefaultVolume` per input:
+  - Integer, e.g. `96`
+  - dB string, e.g. `"-51.5 dB"`
+  - `""` = inherit `GlobalDefaultVolume`
+  - `false` = disable for that input
+- An empty `GlobalDefaultVolume` makes no volume change.
+- dB values always use `VolumeDbAtZero` and `VolumeDbStepSize`, regardless of display mode.
+- Apply defaults once after a confirmed input change while powered on.
+- Set `StartupDefaultVolume: true` to also apply after a confirmed standby-to-on transition.
+- Never apply defaults during initial connection, reconnection, or calibration.
+- Targets must be within the reported API range. Preserve mute state.
+- Detection is not instantaneous; audio may briefly play at the previous volume. This is not a safety limiter.
+- Optional retry delay: append `+seconds`, e.g. `"-50.5 dB +2"` or `"93 +2"`.
+  - Apply immediately.
+  - After the delay, fetch fresh status and reapply once if needed.
+  - Cancel the retry on state/connection changes, calibration, suspended polling, or remote volume/mute commands.
+  - Physical-remote changes during the delay may be mistaken for CEC changes and overwritten.
