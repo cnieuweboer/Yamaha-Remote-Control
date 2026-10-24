@@ -6,7 +6,7 @@ from pathlib import Path
 import runpy
 import unittest
 import time
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 from PySide6.QtCore import QCoreApplication, QEvent, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication

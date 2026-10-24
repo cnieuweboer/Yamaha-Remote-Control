@@ -506,7 +506,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.24.5"
+__version__ = "2026.10.24.6"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -3176,7 +3176,7 @@ class YamahaRemote(QWidget):
 
     def run_worker(self, function, on_result=None, on_error=None, on_finished=None, *, request_group="background"):
         if self._shutting_down or missing_config_settings(self.config):
-            return
+            return False
         worker = Worker(function)
         self._workers.add(worker)
         generation = self._worker_generation
@@ -3201,6 +3201,7 @@ class YamahaRemote(QWidget):
         worker.signals.error.connect(deliver_error)
         worker.signals.finished.connect(finished)
         self.pool.start(worker)
+        return True
 
     def run_action(self, action, *, background=False, batch_volume=False, on_result=None, on_error=None,
                    refresh_groups=None):
