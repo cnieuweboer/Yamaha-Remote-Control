@@ -24,7 +24,7 @@ from PySide6.QtCore import qVersion, QByteArray, QEasingCurve, QElapsedTimer, QR
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtGui import QAction, QKeySequence, QFont, QIcon, QPalette, QStyleHints
 from PySide6.QtWidgets import (
-    QApplication,
+    QAbstractSpinBox, QLineEdit, QPlainTextEdit, QTextEdit, QApplication,
     QComboBox,
     QFileIconProvider,
     QGridLayout,
@@ -506,7 +506,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.24.3"
+__version__ = "2026.10.24.4"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -786,6 +786,106 @@ def _ordered_entries(entries, sort_by_name):
     return items
 
 
+MOUSE_BINDING_LABELS = {
+    "MouseMiddle": "Middle mouse button", "MouseBack": "Mouse back button",
+    "MouseForward": "Mouse forward button", "WheelUp": "Mouse wheel up",
+    "WheelDown": "Mouse wheel down", "WheelLeft": "Mouse wheel left",
+    "WheelRight": "Mouse wheel right",
+}
+
+
+def _mouse_binding(text):
+    return next((name for name in MOUSE_BINDING_LABELS if name.casefold() == text.strip().casefold()), None)
+
+
+def _binding_label(text):
+    mouse = _mouse_binding(text)
+    return MOUSE_BINDING_LABELS[mouse] if mouse else QKeySequence.fromString(
+        text, QKeySequence.PortableText).toString(QKeySequence.NativeText)
+
+
+class MouseShortcuts:
+    """Local Qt mouse gestures, sharing the remote's existing action dispatch."""
+    def __init__(self, window, bindings, dispatch):
+        self.window, self.bindings, self.dispatch = window, bindings, dispatch
+        self.pressed = set()
+        self.remainders = {"x": 0, "y": 0}
+
+    def reset(self):
+        self.pressed.clear()
+        self.remainders = {"x": 0, "y": 0}
+
+    def handle(self, watched, event):
+        kind = event.type()
+        if kind in (QEvent.WindowDeactivate, QEvent.Hide) and watched is self.window:
+            self.reset()
+        if kind not in (QEvent.MouseButtonPress, QEvent.MouseButtonDblClick,
+                        QEvent.MouseButtonRelease, QEvent.Wheel):
+            return False
+        if kind == QEvent.MouseButtonRelease:
+            if event.button() in self.pressed:
+                self.pressed.remove(event.button())
+                event.accept()
+                return True
+            return False
+        window = self.window
+        eligible = (not window._shutting_down and window.isActiveWindow()
+                    and window.isVisible() and not window.isMinimized() and window.isEnabled()
+                    and QApplication.activePopupWidget() is None
+                    and QApplication.activeModalWidget() is None
+                    and isinstance(watched, QWidget) and watched.window() is window
+                    and watched.isEnabled())
+        widget = watched if isinstance(watched, QWidget) else None
+        while eligible and widget is not None:
+            if isinstance(widget, (QComboBox, QTextEdit, QPlainTextEdit, QLineEdit, QAbstractSpinBox)):
+                eligible = False
+            widget = widget.parentWidget()
+        if not eligible or event.modifiers() != Qt.NoModifier:
+            self.remainders = {"x": 0, "y": 0}
+            return False
+        if kind != QEvent.Wheel:
+            name = {Qt.MiddleButton: "MouseMiddle", Qt.BackButton: "MouseBack",
+                    Qt.ForwardButton: "MouseForward"}.get(event.button())
+            command = self.bindings.get(name)
+            if command is None:
+                return False
+            if event.button() in self.pressed or self.dispatch(command):
+                self.pressed.add(event.button())
+                event.accept()
+                return True
+            return False
+        if event.phase() in (Qt.ScrollBegin, Qt.ScrollEnd):
+            self.remainders = {"x": 0, "y": 0}
+        delta = event.angleDelta()
+        axis = "x" if abs(delta.x()) > abs(delta.y()) else "y"
+        amount = delta.x() if axis == "x" else delta.y()
+        if not amount:
+            return False  # Pixel-only touchpad gestures keep their normal behavior.
+        name = ("WheelRight" if amount > 0 else "WheelLeft") if axis == "x" else (
+            "WheelUp" if amount > 0 else "WheelDown")
+        command = self.bindings.get(name)
+        if command is None:
+            self.remainders[axis] = 0
+            return False
+        previous = self.remainders[axis]
+        if previous * amount < 0:
+            previous = 0
+        total = previous + amount
+        steps = abs(total) // 120
+        handled = False
+        for _ in range(steps):
+            if not self.dispatch(command):
+                self.remainders[axis] = 0
+                if handled:
+                    event.accept()
+                return handled
+            handled = True
+        self.remainders[axis] = (1 if total > 0 else -1) * (abs(total) % 120)
+        # Consume bound partial deltas too, preventing parent propagation/counting twice.
+        event.accept()
+        return True
+
+
 def _validate_shortcuts(raw, *, defaults=None, section="Shortcuts"):
     defaults = DEFAULT_SHORTCUTS if defaults is None else defaults
     if not isinstance(raw, dict):
@@ -804,12 +904,18 @@ def _validate_shortcuts(raw, *, defaults=None, section="Shortcuts"):
         for text in bindings:
             if not isinstance(text, str) or not text.strip():
                 raise ConfigError(f'{section}.{action} contains an empty or invalid key.')
-            sequence = QKeySequence.fromString(text.strip(), QKeySequence.PortableText)
-            if (sequence.count() != 1 or sequence[0].key() in (Qt.Key_unknown, 0)
-                    or not sequence.toString(QKeySequence.PortableText)):
-                raise ConfigError(f'{section}.{action}: invalid single-key combination {text!r}.')
-            code = sequence[0].toCombined()
-            canonical = sequence.toString(QKeySequence.PortableText)
+            mouse = _mouse_binding(text)
+            if mouse:
+                if section != "Shortcuts":
+                    raise ConfigError("Mouse bindings are only supported in focused Shortcuts, not GlobalShortcuts.")
+                code, canonical = mouse, mouse
+            else:
+                sequence = QKeySequence.fromString(text.strip(), QKeySequence.PortableText)
+                if (sequence.count() != 1 or sequence[0].key() in (Qt.Key_unknown, 0)
+                        or not sequence.toString(QKeySequence.PortableText)):
+                    raise ConfigError(f'{section}.{action}: invalid single-key combination {text!r}.')
+                code = sequence[0].toCombined()
+                canonical = sequence.toString(QKeySequence.PortableText)
             if code in owners:
                 raise ConfigError(f'Shortcut {canonical!r} is assigned more than once '
                                   f'({owners[code]} and {action}).')
@@ -821,7 +927,12 @@ def _validate_shortcuts(raw, *, defaults=None, section="Shortcuts"):
 def _compile_shortcuts(config, section="Shortcuts"):
     return {QKeySequence.fromString(text, QKeySequence.PortableText)[0].toCombined():
             SHORTCUT_ACTIONS[action]
-            for action, bindings in config[section].items() for text in bindings}
+            for action, bindings in config[section].items() for text in bindings if not _mouse_binding(text)}
+
+
+def _compile_mouse_shortcuts(config):
+    return {_mouse_binding(text): SHORTCUT_ACTIONS[action]
+            for action, bindings in config["Shortcuts"].items() for text in bindings if _mouse_binding(text)}
 
 
 def _shortcut_code(event):
@@ -841,9 +952,9 @@ def _focused_shortcut_command(bindings, event):
 
 def _shortcut_tip(config, command):
     action = next((name for name, value in SHORTCUT_ACTIONS.items() if value == command), None)
-    labels = [QKeySequence.fromString(text, QKeySequence.PortableText).toString(QKeySequence.NativeText)
+    labels = [_binding_label(text)
               for text in config["Shortcuts"].get(action, [])]
-    global_labels = [QKeySequence.fromString(text, QKeySequence.PortableText).toString(QKeySequence.NativeText)
+    global_labels = [_binding_label(text)
                      for text in config.get("GlobalShortcuts", {}).get(action, [])]
     labels = [label for label in labels if label not in global_labels]
     lines = ["Shortcut: " + " / ".join(labels)] if labels else []
@@ -2631,6 +2742,7 @@ class YamahaRemote(QWidget):
         super().__init__()
         self.config = config
         self._shortcut_bindings = _compile_shortcuts(config)
+        self._mouse_shortcuts = MouseShortcuts(self, _compile_mouse_shortcuts(config), self._accept_mouse_shortcut)
         self._global_bindings = _compile_shortcuts(config, "GlobalShortcuts")
         self._global_native_bindings = {}
         for code, command in self._global_bindings.items():
@@ -3866,6 +3978,9 @@ class YamahaRemote(QWidget):
             self._hotkey_ready.emit()
         return True
 
+    def _accept_mouse_shortcut(self, command):
+        return not self.calibration_active and self._accept_focused_hotkey(command)
+
     def _accept_focused_hotkey(self, command):
         if self.calibration_active:
             return command in _VOLUME_KEYS.values()
@@ -3912,6 +4027,8 @@ class YamahaRemote(QWidget):
 
 
     def eventFilter(self, watched, event):
+        if hasattr(self, "_mouse_shortcuts") and self._mouse_shortcuts.handle(watched, event):
+            return True
         event_type = event.type()
         if event_type in (QEvent.Show, QEvent.Hide, QEvent.WindowActivate, QEvent.WindowDeactivate):
             if watched is self and event_type in (QEvent.Hide, QEvent.WindowDeactivate):

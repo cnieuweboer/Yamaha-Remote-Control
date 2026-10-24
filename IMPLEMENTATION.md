@@ -318,3 +318,10 @@ Input/power changes, failed/uncertain status, offline/error state, calibration b
 ## Completing missing configuration settings
 
 `_add_missing_settings` fills absent keys from `DEFAULT_CONFIG`, recursively for settings blocks, using independent copies of mutable defaults. Explicit values are preserved, including empty strings, lists and false. `validate_config` uses it before field validation; invalid existing values still raise errors. At startup `load_config` validates before completing the saved document and writes only when something changed, with the existing digest check against concurrent edits. The generic check only ensures `Apps`/`Inputs` blocks exist; discovered entry fields and retired-setting migrations remain separate.
+
+
+## Focused mouse bindings
+
+`Shortcuts` accepts MouseMiddle/MouseBack/MouseForward and WheelUp/Down/Left/Right in the same arrays as keyboard keys. Mouse names normalize case-insensitively and participate in duplicate-binding validation. They compile into a separate local map, never into keyboard/native-hook/IPC ownership codes. GlobalShortcuts remains keyboard-only. Tooltip labels describe both input kinds. No default mouse bindings are added.
+
+The existing application event filter delegates mouse events to the script-local MouseShortcuts handler. It requires the active, visible, enabled remote and events addressed to that window's widgets, excludes popup/modal contexts and combo/editor/spinbox descendants, and leaves left/right clicks and modified mouse events untouched. Mouse button releases are consumed only after an accepted press. Angular wheel deltas accumulate at 120 units per notch per axis; reversals clear the opposite remainder, bound partial deltas are consumed to prevent duplicate parent propagation, and pixel-only touchpad events remain normal. Natural scrolling follows Qt's delivered angle direction. Mouse actions use the existing focused dispatch and device/routing guards; physical keyboard ownership and SMTC are unchanged.
