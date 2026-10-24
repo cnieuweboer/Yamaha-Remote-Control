@@ -4,6 +4,8 @@ Release identifiers below come from the corresponding commits. Some releases upd
 
 ## 2026-10-24
 
+- Yamaha Remote 2026.10.24.3 — Centralize filling and saving missing configuration settings from DEFAULT_CONFIG, including nested settings blocks. Preserve explicit values and keep discovered app/input entry handling separate.
+
 - Yamaha Remote 2026.10.24.2 — Support +seconds on default-volume strings for one fresh-status check and optional correction after immediate application. Preserve mute, cancel on user intent and uncertain/changed state, exclude older in-flight polls, and reuse the polling coordinator without periodic enforcement.
 
 - Yamaha Remote 2026.10.24.1 — Add input DefaultVolume presets, GlobalDefaultVolume inheritance, explicit per-input opt-out and StartupDefaultVolume for confirmed standby-to-on transitions. Accept raw integers/dB strings with conversion and API-range validation. Preserve mute, skip initial/reconnections and calibration, and reuse serialized commands/status polling.

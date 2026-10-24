@@ -506,7 +506,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.24.2"
+__version__ = "2026.10.24.3"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -872,6 +872,20 @@ def show_missing_config_settings(config):
         )
 
 
+def _add_missing_settings(config, defaults=None):
+    """Fill absent settings in place; preserve explicit values and dynamic entries."""
+    defaults = DEFAULT_CONFIG if defaults is None else defaults
+    changed = False
+    for key, default in defaults.items():
+        if key not in config:
+            config[key] = copy.deepcopy(default)
+            changed = True
+        elif (key not in ("Apps", "Inputs") and isinstance(default, dict)
+              and isinstance(config[key], dict)):
+            changed = _add_missing_settings(config[key], default) or changed
+    return changed
+
+
 def validate_config(raw_config, *, allow_incomplete=False):
     if not isinstance(raw_config, dict):
         raise ConfigError(
@@ -887,8 +901,8 @@ def validate_config(raw_config, *, allow_incomplete=False):
     if unknown:
         raise ConfigError("Unknown configuration setting(s): " + ", ".join(sorted(unknown)) + ".")
 
-    config = _default_config_copy()
-    config.update(raw_config)
+    config = copy.deepcopy(raw_config)
+    _add_missing_settings(config)
     config["Shortcuts"] = _validate_shortcuts(config["Shortcuts"])
     config["GlobalShortcuts"] = _validate_shortcuts(
         config["GlobalShortcuts"], defaults=DEFAULT_CONFIG["GlobalShortcuts"], section="GlobalShortcuts")
@@ -958,25 +972,21 @@ def load_config():
         ) from ex
 
     config = validate_config(raw_config, allow_incomplete=True)
-    collections = ("Apps", "Inputs") if "Apps" in config else ("Inputs",)
-    missing_removed = any("Removed" not in item for collection in collections
-                          for item in raw_config.get(collection, {}).values())
-    missing_defaults = ("GlobalDefaultVolume" not in raw_config or "StartupDefaultVolume" not in raw_config
-                        or any("DefaultVolume" not in item for item in raw_config.get("Inputs", {}).values()))
-    if (missing_defaults or "Shortcuts" not in raw_config or set(DEFAULT_SHORTCUTS) - set(raw_config["Shortcuts"])
-            or "GlobalShortcuts" not in raw_config or "GlobalVolumeHotkeys" in raw_config
-            or set(DEFAULT_CONFIG["GlobalShortcuts"]) - set(raw_config["GlobalShortcuts"]) or missing_removed):
-        updated = dict(raw_config)
-        if missing_defaults:
-            updated["GlobalDefaultVolume"] = config["GlobalDefaultVolume"]
-            updated["StartupDefaultVolume"] = config["StartupDefaultVolume"]
-            updated["Inputs"] = config["Inputs"]
-        updated["Shortcuts"] = config["Shortcuts"]
-        updated["GlobalShortcuts"] = config["GlobalShortcuts"]
-        updated.pop("GlobalVolumeHotkeys", None)
-        if missing_removed:
-            for collection in collections:
-                updated[collection] = config[collection]
+    updated = copy.deepcopy(raw_config)
+    # Retiring an old setting is a migration, separate from filling defaults.
+    retired_global = "GlobalVolumeHotkeys" in updated
+    if retired_global:
+        if "GlobalShortcuts" not in updated:
+            updated["GlobalShortcuts"] = copy.deepcopy(config["GlobalShortcuts"])
+        updated.pop("GlobalVolumeHotkeys")
+    changed = _add_missing_settings(updated)
+    changed = changed or retired_global
+    # Discovered entry fields remain the responsibility of their own validators.
+    if any(field not in item for item in raw_config.get("Inputs", {}).values()
+           for field in ("Removed", "DefaultVolume")):
+        updated["Inputs"] = config["Inputs"]
+        changed = True
+    if changed:
         save_config(updated, expected_digest=hashlib.sha256(content).digest())
     return config
 
