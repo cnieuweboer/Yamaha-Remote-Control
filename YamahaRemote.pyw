@@ -506,7 +506,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.24.6"
+__version__ = "2026.10.29.1"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -2310,18 +2310,35 @@ class Worker(QRunnable):
 # ----------------------------
 
 
-class DraggableLabel(QLabel):
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            window = self.window()
-            handle = window.windowHandle()
+class WindowDrag(QObject):
+    """Start native moves only for actual drags, preserving ordinary releases."""
+    def __init__(self, widget):
+        super().__init__(widget)
+        self._origin = None
+        widget.installEventFilter(self)
 
-            if handle is not None:
-                handle.startSystemMove()
+    def eventFilter(self, watched, event):
+        kind = event.type()
+        if kind in (QEvent.Hide, QEvent.WindowDeactivate):
+            self._origin = None
+        elif kind == QEvent.MouseButtonPress:
+            if (event.button() == Qt.LeftButton and event.buttons() == Qt.LeftButton
+                    and (not watched.isWindow() or watched.childAt(event.position().toPoint()) is None)):
+                self._origin = event.globalPosition().toPoint()
                 event.accept()
-                return
-
-        super().mousePressEvent(event)
+                return True
+        elif kind == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+            self._origin = None
+        elif kind == QEvent.MouseMove and self._origin is not None:
+            if not event.buttons() & Qt.LeftButton:
+                self._origin = None
+            elif (event.globalPosition().toPoint() - self._origin).manhattanLength() >= QApplication.startDragDistance():
+                self._origin = None
+                handle = watched.window().windowHandle()
+                if handle is not None and handle.startSystemMove():
+                    event.accept()
+                    return True
+        return False
 
 
 class FavoriteButton(QPushButton):
@@ -2828,6 +2845,7 @@ class YamahaRemote(QWidget):
         self._native_volume_hook = None
 
         self._build_ui()
+        self._window_drags = (WindowDrag(self), WindowDrag(self.volume_value))
         self._apply_style()
         self._fit_and_lock_window()
         self._setup_timers()
@@ -3005,7 +3023,7 @@ class YamahaRemote(QWidget):
 
     def _build_volume_controls(self):
         layout = self._section("Volume")
-        self.volume_value = DraggableLabel("—", self)
+        self.volume_value = QLabel("—", self)
         self.volume_value.setObjectName("volumeValue")
         self.volume_value.setAlignment(Qt.AlignCenter)
         volume_font = self.volume_value.font()
@@ -4436,21 +4454,6 @@ class YamahaRemote(QWidget):
         self._shutdown()
         event.accept()
         QApplication.quit()
-
-    def mousePressEvent(self, event):
-        if (
-            event.button() == Qt.LeftButton
-            and self.childAt(event.position().toPoint()) is None
-        ):
-            handle = self.windowHandle()
-
-            if handle is not None:
-                handle.startSystemMove()
-                event.accept()
-                return
-
-        super().mousePressEvent(event)
-
 
 # ----------------------------
 # Application entry points

@@ -2,6 +2,10 @@
 
 For everyday use, see the [README](README.md). Dated changes are in the [release history](CHANGELOG.md).
 
+## Window dragging
+
+The empty window background and volume label use the same local `WindowDrag` event filter. A left press arms the gesture; only movement reaching `QApplication.startDragDistance()` starts the native system move. A simple click stays on Qt's ordinary release path. This avoids the Windows behavior where a click-only native move can leave hover feedback and tooltips blocked until another click. Buttons and grouped backgrounds do not initiate dragging. Pending gestures clear on release, hide or deactivation; `tests/test_window_drag.py` checks clicks, hover state, threshold movement and cancellation without requiring native window movement.
+
 ## Volume hotkeys
 
 Only Volume Up, Volume Down, and Mute are handled. Other media keys retain their normal behavior. These keys control the amplifier only when it is reachable, powered on, and its last confirmed status is no more than six seconds old. Otherwise, new keypresses pass through normally; hotkeys never wake the amplifier. Global keys target the amplifier regardless of its selected input.

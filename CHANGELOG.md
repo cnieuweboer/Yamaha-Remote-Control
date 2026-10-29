@@ -2,6 +2,10 @@
 
 Release identifiers below come from the corresponding commits. Some releases updated only the calibration helper; the remote and helper can therefore have different version numbers. Historical behavior may have been superseded by later releases.
 
+## 2026-10-29
+
+- Yamaha Remote 2026.10.29.1 — Start native window movement from the volume label or empty background only after the cursor crosses Qt's drag threshold. Ordinary clicks keep the normal mouse-release path, preventing hover styling and tooltips from becoming stuck. Share the drag handler and clear pending gestures on release, hide or deactivation.
+
 ## 2026-10-24
 
 - Yamaha Remote 2026.10.24.6 — Return explicit worker acceptance results so rejected input-discovery submissions can clear their running flag. Remove unused test imports and assignments; normal command execution and polling behavior are unchanged.
