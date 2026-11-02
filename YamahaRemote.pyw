@@ -506,7 +506,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.10.29.1"
+__version__ = "2026.11.02.1"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -2302,7 +2302,11 @@ class Worker(QRunnable):
         except Exception as exc:
             self.signals.error.emit(exc)
         finally:
+            self.function = None  # Completed jobs no longer need captured request state.
             self.signals.finished.emit()
+            # Qt-held callbacks can reference this worker. Dispose the signal
+            # object on its owning thread after queued callbacks are delivered.
+            self.signals.deleteLater()
 
 
 # ----------------------------
@@ -4373,6 +4377,10 @@ class YamahaRemote(QWidget):
         # Drop queued jobs; active requests have their own bounded timeouts.
         self.pool.clear()
         self.pool.waitForDone()
+        for worker in self._workers:
+            # Jobs removed by clear() never run their completion cleanup.
+            worker.function = None
+            worker.signals.deleteLater()
         self._workers.clear()
         self.poll_running = False
         self.action_running = False

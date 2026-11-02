@@ -336,3 +336,10 @@ The existing application event filter delegates mouse events to the script-local
 Known read responses are validated at the HTTP boundary before a polling success, recovery or cached full response is recorded. Validation covers fields consumed by the remote, permits additional device fields and accepts valid empty inventories. Invalid contents raise `DeviceResponseError`, increment `failures` and `malformed_responses` once, and leave the previous valid cached response intact; only a subsequent valid device response counts as recovery. HTTP errors, device rejections and connection failures retain their separate categories.
 
 `tests/test_poll_response_validation.py` exercises real API decoding with mocked HTTP responses, including nested malformed contents, preserved caches, recovery counts, extra fields and empty inventories. Yamaha also validates each advertised speaker output before recording its state response, without requiring unsupported outputs.
+
+
+## Background-worker lifetime
+
+A worker drops its executed callable, emits completion, and schedules its `WorkerSignals` QObject for deletion on that object's owning thread. Result/error and completion notifications remain queued in order before deferred deletion. Explicit signal disposal releases Qt-held callback closures that can otherwise keep the worker and captured request state alive after the pool has deleted its native runnable. This applies to device jobs and state-dump writes without adding timers or periodic garbage collection.
+
+Restart/shutdown still clears queued jobs and drains active jobs using the existing lifecycle. It then releases callables and schedules signal deletion for any workers left in the tracking set, including queued jobs that never ran their completion cleanup. `tests/test_worker_cleanup.py` checks repeated success/error delivery, GUI-thread callbacks, stale-generation suppression, discarded queues and native signal destruction. Sony additionally checks its separate command pool. Binding-level caches may keep invalid Python wrappers temporarily; tests verify that those wrappers retain neither live signal objects nor captured callables.
