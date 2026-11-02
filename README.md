@@ -89,6 +89,21 @@ Launching Yamaha Remote again restores its existing window, including from the s
 
 Regular status polling pauses while the window is hidden or minimized and refreshes immediately when restored, unless Windows global volume hotkeys are enabled and their hook is installed, or a local TV remote is connected through IPC. In that case, the existing polling timer continues while hidden, including in standby or offline, so external power changes and reconnections can be detected. Active requests finish normally; configuration file watching remains enabled.
 
+### Default volume per input
+
+- Set `DefaultVolume` per input:
+  - Integer, e.g. `96`
+  - dB string, e.g. `"-51.5 dB"`
+  - `""` = inherit `GlobalDefaultVolume`
+  - `false` = disable for that input
+- An empty `GlobalDefaultVolume` makes no volume change.
+- Apply defaults once after a confirmed input change while powered on.
+- Set `StartupDefaultVolume: true` to also apply after a confirmed standby-to-on transition.
+- Detection is not instantaneous; audio may briefly play at the previous volume. This is not a safety limiter.
+- Optional retry delay: append `+seconds`, e.g. `"-50.5 dB +2"` or `"93 +2"`.
+  - Apply immediately.
+  - After the delay, fetch fresh status and reapply once if needed.
+  - Cancel the retry on state/connection changes, calibration, suspended polling, or remote volume/mute commands.
 
 ## Volume hotkeys
 
@@ -119,19 +134,3 @@ Run `python YamahaRemote.pyw --dump-state` while the remote is running to save a
 Use `--dump-state-full` instead to include the last successful decoded response for each polling request, with its timestamp and age. It still makes no fresh queries; full reports may include device/network identifiers and app inventories, so review them before sharing.
 
 Both reports also include session-only polling counters for successes, empty inventories, failures and recoveries; these reset when the remote restarts.
-
-### Default volume per input
-
-- Set `DefaultVolume` per input:
-  - Integer, e.g. `96`
-  - dB string, e.g. `"-51.5 dB"`
-  - `""` = inherit `GlobalDefaultVolume`
-  - `false` = disable for that input
-- An empty `GlobalDefaultVolume` makes no volume change.
-- Apply defaults once after a confirmed input change while powered on.
-- Set `StartupDefaultVolume: true` to also apply after a confirmed standby-to-on transition.
-- Detection is not instantaneous; audio may briefly play at the previous volume. This is not a safety limiter.
-- Optional retry delay: append `+seconds`, e.g. `"-50.5 dB +2"` or `"93 +2"`.
-  - Apply immediately.
-  - After the delay, fetch fresh status and reapply once if needed.
-  - Cancel the retry on state/connection changes, calibration, suspended polling, or remote volume/mute commands.
