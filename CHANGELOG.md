@@ -2,6 +2,10 @@
 
 Release identifiers below come from the corresponding commits. Some releases updated only the calibration helper; the remote and helper can therefore have different version numbers. Historical behavior may have been superseded by later releases.
 
+## 2026-11-24
+
+- Yamaha Remote 2026.11.24.1 — Save window placement using the same outer-frame coordinates used at startup, preventing title-bar drift after reopening.
+
 ## 2026-11-08
 
 - Yamaha Remote 2026.11.08.3 - Stale-code pass, continued. The retired `GlobalVolumeHotkeys` toggle is no longer translated: `validate_config` drops the pop-and-convert path along with the temporary copy of the caller's dictionary that existed only to allow it, and `load_config` drops the removal-and-save path, so a file that still holds it is reported at startup as `Unknown configuration setting(s): GlobalVolumeHotkeys` and left untouched until its owner removes it - the same treatment every other retired name now gets. `tests/test_global_shortcuts.py` asserts that rejection and that a rejected file is not rewritten. `self._window_drags` is removed for the same reason as in Sony Remote 2026.11.08.3, and the `WindowDrag` docstring states the lifetime rule instead.

@@ -506,7 +506,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.11.08.3"
+__version__ = "2026.11.24.1"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -4515,8 +4515,8 @@ class YamahaRemote(QWidget):
 
     def moveEvent(self, event):
         super().moveEvent(event)
-        # Only a real placement is recorded; the file is written on shutdown alone.
-        self._placement_position = event.pos()
+        # QWidget.move() takes the outer frame position for a top-level window.
+        self._placement_position = self.frameGeometry().topLeft()
 
     def hideEvent(self, event):
         super().hideEvent(event)

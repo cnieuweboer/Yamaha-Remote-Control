@@ -12,6 +12,7 @@ import unittest
 from unittest.mock import patch
 
 from PySide6.QtCore import QPoint, QRect
+from PySide6.QtGui import QMoveEvent
 from PySide6.QtWidgets import QApplication
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -282,6 +283,14 @@ class PlacementStartupTests(unittest.TestCase):
         move, restore = self.start(window, f'--restart-window-geometry={geometry}')
         move.assert_not_called()
         restore.assert_called_once()
+
+    def test_remembered_placement_uses_frame_coordinates(self):
+        window = self.build_window()
+        # Simulate a title bar offset between the client origin and frame.
+        with patch.object(window, 'frameGeometry', return_value=QRect(260, 210, 305, 500)):
+            window.moveEvent(QMoveEvent(QPoint(268, 241), QPoint(0, 0)))
+        window._shutdown()
+        self.assertEqual(R["read_window_placement"](window.config), (260, 210))
 
     def test_a_real_move_is_recorded_and_written_once_on_shutdown(self):
         window = self.build_window()
