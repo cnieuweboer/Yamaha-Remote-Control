@@ -28,7 +28,6 @@ class GlobalConfigurationTests(unittest.TestCase):
         config = self.config()
         self.assertEqual(config['GlobalShortcuts'], dict(VolumeUp=[], VolumeDown=[], Mute=[]))
         self.assertTrue(config['Shortcuts']['VolumeUp'])
-        self.assertNotIn('GlobalVolumeHotkeys', config)
 
     def test_partial_empty_and_independent_profiles(self):
         config = self.config({'VolumeUp':['Ctrl+Alt+Up'], 'Mute':''})
@@ -48,20 +47,20 @@ class GlobalConfigurationTests(unittest.TestCase):
         with self.assertRaises(R['ConfigError']):
             self.config({'VolumeUp':['Num+Enter'], 'VolumeDown':['Enter']})
 
-    def test_retired_toggle_migrates_once_and_explicit_bindings_win(self):
+    def test_retired_toggle_is_rejected_rather_than_translated(self):
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory)/'config.json'
+            path = Path(directory) / 'config.json'
             raw = R['_default_config_copy']()
             raw.pop('GlobalShortcuts')
             raw.update(Host='amp.local', GlobalVolumeHotkeys=True)
-            path.write_text(json.dumps(raw))
-            with patch.dict(G, CONFIG_PATH=path):
-                config = R['load_config']()
-            self.assertEqual(config['GlobalShortcuts'], R['DEFAULT_SHORTCUTS'])
-            saved = json.loads(path.read_text())
-            self.assertNotIn('GlobalVolumeHotkeys', saved)
-            self.assertEqual(saved['GlobalShortcuts'], config['GlobalShortcuts'])
-        self.assertFalse(any(self.config({}, GlobalVolumeHotkeys=True)['GlobalShortcuts'].values()))
+            text = json.dumps(raw)
+            path.write_text(text)
+            with patch.dict(G, CONFIG_PATH=path), self.assertRaises(R['ConfigError']):
+                R['load_config']()
+            # A rejected file is left exactly as its owner wrote it.
+            self.assertEqual(path.read_text(), text)
+        with self.assertRaisesRegex(R['ConfigError'], r'Unknown configuration setting\(s\): GlobalVolumeHotkeys'):
+            self.config({}, GlobalVolumeHotkeys=True)
 
     def test_native_modifier_and_keypad_translation(self):
         native = R['_native_binding']

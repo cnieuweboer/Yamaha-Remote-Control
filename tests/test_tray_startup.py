@@ -39,7 +39,8 @@ class TrayStartupTests(unittest.TestCase):
 
     def setUp(self):
         self.config = REMOTE['_default_config_copy']()
-        self.config.update(Host='device.local', SystemTray=True, CloseToTray=True)
+        self.config.update(Host='device.local')
+        self.config['Tray'].update(Enabled=True, CloseToTray=True)
         if NAME == 'Sony':
             self.config['PreSharedKey'] = 'test-only'
         self.window = Window()
@@ -106,7 +107,7 @@ class TrayStartupTests(unittest.TestCase):
         self.assertEqual(self.window.shows, 0)
 
     def test_tray_restart_opens_when_tray_disabled(self):
-        self.config['SystemTray'] = False
+        self.config['Tray']['Enabled'] = False
         self.run_startup('--start-in-tray', '--restart-window-state=tray')
         self.assert_visible()
 
@@ -151,12 +152,12 @@ class TrayStartupTests(unittest.TestCase):
         self.assert_visible()
 
     def test_close_to_tray_disabled_starts_visible(self):
-        self.config['CloseToTray'] = False
+        self.config['Tray']['CloseToTray'] = False
         self.run_startup('--start-in-tray')
         self.assert_visible()
 
     def test_system_tray_disabled_starts_visible(self):
-        self.config.update(SystemTray=False, CloseToTray=False)
+        self.config['Tray'].update(Enabled=False, CloseToTray=False)
         self.window.tray = None
         self.run_startup('--start-in-tray')
         self.assert_visible()

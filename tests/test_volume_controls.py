@@ -24,7 +24,7 @@ class VolumeControlTests(unittest.TestCase):
 
     def window(self, dark=True):
         config = REMOTE['_default_config_copy']()
-        config.update(DarkMode=dark, Mica=False)
+        config['Window'].update(DarkMode=dark, Mica=False)
         with ExitStack() as stack:
             for method in ('_setup_calibration', '_setup_activation', '_setup_ipc',
                            '_setup_hotkeys', '_setup_tray', '_setup_config_watcher', 'initialize'):

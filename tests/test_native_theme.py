@@ -1,4 +1,5 @@
 """Native color-scheme requests and inheritance without device access."""
+import copy
 import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from pathlib import Path
@@ -24,9 +25,9 @@ class NativeThemeTests(unittest.TestCase):
         app = Mock()
         hints = app.styleHints.return_value
         with patch.dict(REMOTE["configure_app_theme"].__globals__, QApplication=app):
-            REMOTE["configure_app_theme"]({"DarkMode": True})
+            REMOTE["configure_app_theme"]({"Window": {"DarkMode": True}})
             hints.setColorScheme.assert_called_with(Qt.ColorScheme.Dark)
-            REMOTE["configure_app_theme"]({"DarkMode": False})
+            REMOTE["configure_app_theme"]({"Window": {"DarkMode": False}})
             hints.setColorScheme.assert_called_with(Qt.ColorScheme.Light)
 
     def test_controls_follow_palette_changes_without_fixed_color_overrides(self):
@@ -34,6 +35,7 @@ class NativeThemeTests(unittest.TestCase):
         self.addCleanup(self.app.setPalette, original)
         window = QWidget()
         window.mica_enabled = False
+        window.config = copy.deepcopy(REMOTE["DEFAULT_CONFIG"])
         window.setObjectName("remoteRoot")
         button, combo = QPushButton("Volume", window), QComboBox(window)
         REMOTE[f"{BRAND}Remote"]._apply_style(window)
@@ -61,6 +63,7 @@ class NativeThemeTests(unittest.TestCase):
     def test_compact_playback_row_matches_previous_padding_size(self):
         window = QWidget()
         window.mica_enabled = False
+        window.config = copy.deepcopy(REMOTE["DEFAULT_CONFIG"])
         row = QHBoxLayout(window)
         row.setSpacing(6)
         buttons = [QPushButton(text) for text in ("Prev", "Rew", "Play / Pause", "Fwd", "Next")]
@@ -80,7 +83,8 @@ class NativeThemeTests(unittest.TestCase):
     def test_mica_restores_section_and_control_surfaces(self):
         window = QWidget()
         window.mica_enabled = True
-        window.config = {"DarkMode": True}
+        window.config = copy.deepcopy(REMOTE["DEFAULT_CONFIG"])
+        window.config["Window"]["DarkMode"] = True
         REMOTE[f"{BRAND}Remote"]._apply_style(window)
         self.assertIn("background: transparent", window.styleSheet())
         self.assertIn("background: rgba(38,38,38,185)", window.styleSheet())
@@ -88,7 +92,7 @@ class NativeThemeTests(unittest.TestCase):
         self.assertIn("background-color: rgb(48,48,48)", window.styleSheet())
         self.assertIn("border: 1px solid rgba(120,120,120,150)", window.styleSheet())
         self.assertIn("background-color: rgb(40,40,40)", window.styleSheet())
-        window.config["DarkMode"] = False
+        window.config["Window"]["DarkMode"] = False
         REMOTE[f"{BRAND}Remote"]._apply_style(window)
         self.assertIn("background: rgba(255,255,255,190)", window.styleSheet())
         self.assertIn("background-color: rgb(255,255,255)", window.styleSheet())

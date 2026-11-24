@@ -1,16 +1,21 @@
 {
   "Host": "",
-  "DarkMode": true,
-  "Mica": true,
+  "Window": {
+    "DarkMode": true,
+    "Mica": true,
+    "FontName": "",
+    "FontSize": null,
+    "RememberPlacement": true
+  },
+  "Tray": {
+    "Enabled": false,
+    "CloseToTray": false
+  },
+  "GlobalDefaultVolume": "",
+  "StartupDefaultVolume": false,
   "VolumeDb": true,
   "VolumeDbAtZero": -97.0,
   "VolumeDbStepSize": 0.5,
-  "DiagnosticsEnabled": false,
-  "SortByName": false,
-  "DropdownAnimationWorkaround": true,
-  "Inputs": {},
-  "SystemTray": false,
-  "CloseToTray": false,
   "Shortcuts": {
     "VolumeUp": [
       "Volume Up"
@@ -27,6 +32,8 @@
     "VolumeDown": [],
     "Mute": []
   },
-  "GlobalDefaultVolume": "",
-  "StartupDefaultVolume": false
+  "Inputs": {},
+  "SortByName": false,
+  "DiagnosticsEnabled": false,
+  "DropdownAnimationWorkaround": true
 }

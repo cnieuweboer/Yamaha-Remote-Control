@@ -35,7 +35,7 @@ class ConfigurationDefaultsTests(unittest.TestCase):
         self.assertEqual(config, before)
 
     def test_load_persists_all_missing_settings_preserving_user_values(self):
-        raw = {'Host': 'device.local', 'DarkMode': False, 'Shortcuts': {'Mute': []}}
+        raw = {'Host': 'device.local', 'Window': {'DarkMode': False}, 'Shortcuts': {'Mute': []}}
         if NAME == 'Sony':
             raw.update(VolumeRateLimit={'Active': False}, DefaultTvVolume={'Volume': ''})
         else:
@@ -50,7 +50,7 @@ class ConfigurationDefaultsTests(unittest.TestCase):
                 R['load_config']()
                 self.assertEqual(path.read_text(), text)
             self.assertEqual(set(saved), set(R['DEFAULT_CONFIG']))
-            self.assertFalse(saved['DarkMode'])
+            self.assertFalse(saved['Window']['DarkMode'])
             self.assertEqual(saved['Shortcuts']['Mute'], [])
             self.assertEqual(saved['Inputs'], {})
             if NAME == 'Sony':
@@ -60,7 +60,8 @@ class ConfigurationDefaultsTests(unittest.TestCase):
                 self.assertEqual(saved['GlobalShortcuts']['VolumeUp'], [])
 
     def test_invalid_existing_values_do_not_get_repaired_or_saved(self):
-        for raw in ({'DarkMode': None}, {'Shortcuts': None}, {'Unknown': True}):
+        for raw in ({'Window': {'DarkMode': None}}, {'Window': 'dark'}, {'Window': {'Font': {}}},
+                  {'Shortcuts': None}, {'Unknown': True}):
             with self.subTest(raw=raw), tempfile.TemporaryDirectory() as folder:
                 path = Path(folder) / 'remote.json'
                 text = json.dumps(raw)
@@ -68,6 +69,22 @@ class ConfigurationDefaultsTests(unittest.TestCase):
                 with patch.dict(R['load_config'].__globals__, CONFIG_PATH=path), self.assertRaises(R['ConfigError']):
                     R['load_config']()
                 self.assertEqual(path.read_text(), text)
+
+    def test_partial_groups_are_completed_without_overwriting_present_members(self):
+        raw = {'Host': 'device.local', 'Window': {'DarkMode': False}, 'Tray': {'Enabled': True}}
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'remote.json'
+            path.write_text(json.dumps(raw))
+            with patch.dict(R['load_config'].__globals__, CONFIG_PATH=path):
+                config = R['load_config']()
+            saved = json.loads(path.read_text())
+        for name in R['GROUP_MEMBERS']:
+            self.assertEqual(set(saved[name]), set(R['GROUP_MEMBERS'][name]))
+            self.assertEqual(set(config[name]), set(R['GROUP_MEMBERS'][name]))
+        self.assertFalse(saved['Window']['DarkMode'])
+        self.assertTrue(saved['Tray']['Enabled'])
+        self.assertFalse(config['Window']['DarkMode'])
+        self.assertTrue(config['Tray']['Enabled'])
 
     def test_concurrent_edit_prevents_migration_save(self):
         with tempfile.TemporaryDirectory() as folder:

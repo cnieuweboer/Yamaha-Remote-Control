@@ -114,7 +114,9 @@ class WorkerCleanupTests(unittest.TestCase):
     def test_pause_releases_jobs_discarded_from_each_queue(self):
         with tempfile.TemporaryDirectory() as folder, ExitStack() as stack:
             config = R['_default_config_copy']()
-            config.update(Host='127.0.0.1', Mica=False, SystemTray=False, CloseToTray=False)
+            config.update(Host='127.0.0.1')
+            config['Window']['Mica'] = False
+            config['Tray'].update(Enabled=False, CloseToTray=False)
             if BRAND == 'Sony':
                 config['PreSharedKey'] = 'test-only'
             path = Path(folder) / (BRAND + 'Remote.json')

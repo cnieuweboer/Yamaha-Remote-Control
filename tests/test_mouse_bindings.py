@@ -6,7 +6,7 @@ import runpy
 import unittest
 from unittest.mock import Mock, patch
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
-from PySide6.QtGui import QMouseEvent, QWheelEvent
+from PySide6.QtGui import QKeyEvent, QMouseEvent, QWheelEvent
 from PySide6.QtWidgets import QApplication, QComboBox, QLineEdit, QMainWindow, QPushButton, QTextEdit
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -215,6 +215,130 @@ class RemoteIntegrationTests(unittest.TestCase):
             window.calibration_active = True
             event = QMouseEvent(QEvent.MouseButtonPress, point, point, Qt.MiddleButton, Qt.MiddleButton, Qt.NoModifier)
             self.assertFalse(window.eventFilter(window.power_button, event))
+
+
+class InactiveWheelTests(unittest.TestCase):
+    """Configured wheel shortcuts work over the visible remote while another window has focus."""
+
+    @classmethod
+    def setUpClass(cls):
+        import test_volume_controls as fixture
+        fixture.VolumeControlTests.setUpClass()
+
+    def setUp(self):
+        import test_volume_controls as fixture
+        self.case = fixture.VolumeControlTests()
+        self.addCleanup(self.case.doCleanups)
+        self.w = self.case.window()
+        self.app = self.case.app
+        self.w._enqueue_hotkey_locked = Mock(return_value=True)
+        self.reported_on()
+        self.w._speaker_outputs = ('a', 'b')
+        self.w._speaker_state = (True, False)
+        self.w.update_control_states()
+        self.w._mouse_shortcuts.bindings = {
+            'WheelUp': 'volume_up', 'WheelDown': 'volume_down',
+            'WheelLeft': 'mute', 'WheelRight': 'mute', 'MouseBack': 'volume_up'}
+        self.context = patch.object(self.w, 'isActiveWindow', return_value=False)
+        self.context.start()
+        self.addCleanup(self.context.stop)
+
+    def reported_on(self):
+        self.w.connected = True
+        self.w.last_status = dict(power='on', volume=80, max_volume=154, mute=False, input='hdmi1')
+        self.w._last_status_at = R['time'].monotonic()
+        self.w.calibration_active = False
+
+    def wheel(self, x=0, y=120, watched=None, outside=False, modifiers=Qt.NoModifier):
+        widget = self.w.power_button if watched is None else watched
+        point = QPointF(5, 5)
+        global_point = QPointF(widget.mapToGlobal(point.toPoint()))
+        if outside:
+            global_point = QPointF(self.w.mapToGlobal(QPoint(-20, -20)))
+        event = QWheelEvent(point, global_point, QPoint(), QPoint(x, y), Qt.NoButton,
+                            modifiers, Qt.NoScrollPhase, False)
+        return self.w.eventFilter(widget, event)
+
+    def test_both_wheel_axes_work_without_activating_the_window(self):
+        with patch.object(self.w, 'activateWindow') as activate, patch.object(self.w, 'raise_') as raise_:
+            self.assertTrue(self.wheel())
+            self.assertTrue(self.wheel(y=-120))
+            self.assertTrue(self.wheel(x=120, y=0))
+            self.assertTrue(self.wheel(x=-120, y=0))
+            self.assertTrue(self.wheel(watched=self.w.volume_value))  # The volume number is a surface too.
+            self.assertEqual([call.args for call in self.w._enqueue_hotkey_locked.call_args_list],
+                             [('volume_up',), ('volume_down',), ('mute',), ('mute',), ('volume_up',)])
+            activate.assert_not_called()
+            raise_.assert_not_called()
+        self.assertFalse(self.w.isActiveWindow())
+
+    def test_unbound_and_partial_deltas_do_not_command(self):
+        self.w._mouse_shortcuts.bindings = {'WheelUp': 'volume_up'}
+        self.assertFalse(self.wheel(x=120, y=0))  # WheelRight is not bound.
+        self.w._enqueue_hotkey_locked.assert_not_called()
+        self.assertTrue(self.wheel(y=70))  # A bound partial delta is consumed only.
+        self.w._enqueue_hotkey_locked.assert_not_called()
+        self.assertTrue(self.wheel(y=70))  # 140 units total is one volume step.
+        self.w._enqueue_hotkey_locked.assert_called_once_with('volume_up')
+
+    def test_mouse_buttons_and_volume_keys_still_require_focus(self):
+        point = QPointF(5, 5)
+        press = QMouseEvent(QEvent.MouseButtonPress, point, point, Qt.BackButton, Qt.BackButton, Qt.NoModifier)
+        self.assertFalse(self.w.eventFilter(self.w.power_button, press))
+        key = QKeyEvent(QEvent.KeyPress, Qt.Key_VolumeUp, Qt.NoModifier)
+        self.assertFalse(self.w.eventFilter(self.w.power_button, key))
+        self.w._enqueue_hotkey_locked.assert_not_called()
+
+    def test_inactive_wheel_requires_the_pointer_inside_the_remote(self):
+        self.assertFalse(self.wheel(outside=True))
+        other = QMainWindow()
+        try:
+            self.assertFalse(self.wheel(watched=other))
+        finally:
+            other.close()
+        self.w._enqueue_hotkey_locked.assert_not_called()
+
+    def test_input_and_speaker_selectors_keep_native_wheel_selection(self):
+        # Both selectors mirror a value the amplifier reports, so the wheel stays
+        # a selection gesture there instead of becoming a volume shortcut.
+        self.assertTrue(self.w.input_combo.isEnabled() and self.w.speaker_combo.isEnabled())
+        for label, widget in (('input', self.w.input_combo), ('speakers', self.w.speaker_combo)):
+            with self.subTest(selector=label):
+                self.assertFalse(self.wheel(watched=widget))
+        self.w._enqueue_hotkey_locked.assert_not_called()
+
+    def test_modifiers_popups_modals_and_hidden_windows_are_not_claimed(self):
+        self.assertFalse(self.wheel(modifiers=Qt.ControlModifier))
+        for name in ('activePopupWidget', 'activeModalWidget'):
+            with self.subTest(guard=name), patch.object(R['QApplication'], name, return_value=self.w.power_button):
+                self.assertFalse(self.wheel())
+        for name in ('isVisible', 'isMinimized'):
+            with self.subTest(guard=name), patch.object(self.w, name, return_value=name == 'isMinimized'):
+                self.assertFalse(self.wheel())
+        self.w._enqueue_hotkey_locked.assert_not_called()
+
+    def test_standby_offline_expired_status_and_calibration_still_block_it(self):
+        for change in ('standby', 'offline', 'expired', 'calibration'):
+            with self.subTest(state=change):
+                self.reported_on()
+                if change == 'standby':
+                    self.w.last_status['power'] = 'standby'
+                elif change == 'offline':
+                    self.w.connected = False
+                elif change == 'expired':
+                    self.w._last_status_at = 0
+                elif change == 'calibration':
+                    self.w.calibration_active = True
+                self.assertFalse(self.wheel())
+                self.w._enqueue_hotkey_locked.assert_not_called()
+
+    def test_deactivation_discards_a_partial_wheel(self):
+        with patch.object(self.w, 'isActiveWindow', return_value=True):
+            self.wheel(y=80)
+        self.w._enqueue_hotkey_locked.assert_not_called()
+        self.w.eventFilter(self.w, QEvent(QEvent.WindowDeactivate))
+        self.wheel(y=60)  # The earlier partial cannot combine with this one.
+        self.w._enqueue_hotkey_locked.assert_not_called()
 
 
 if __name__ == '__main__':

@@ -22,7 +22,7 @@ from urllib.request import build_opener, ProxyHandler
 from PySide6 import __version__ as PYSIDE_VERSION
 from PySide6.QtCore import qVersion, QByteArray, QEasingCurve, QElapsedTimer, QRect, QEvent, QFileInfo, QFileSystemWatcher, QObject, QLockFile, QProcess, QRunnable, QStandardPaths, QThreadPool, QTimer, Qt, Signal
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
-from PySide6.QtGui import QAction, QKeySequence, QFont, QIcon, QPalette, QStyleHints
+from PySide6.QtGui import QAction, QGuiApplication, QKeySequence, QFont, QFontDatabase, QIcon, QPalette, QStyleHints
 from PySide6.QtWidgets import (
     QAbstractSpinBox, QLineEdit, QPlainTextEdit, QTextEdit, QApplication,
     QComboBox,
@@ -506,7 +506,7 @@ class CalibrationServer(QObject):
 APP_NAME = "Yamaha Remote"
 
 
-__version__ = "2026.11.02.1"
+__version__ = "2026.11.08.3"
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("YamahaRemote.json")
@@ -547,42 +547,82 @@ SHORTCUT_ACTIONS = {
 }
 
 
+# Settings are ordered as a person reads them: the device, then the window and how it
+# appears, then volume behaviour, key bindings, the configured input entries, and finally
+# diagnostics. A newly created file follows this order; an existing file keeps the order
+# its owner wrote.
 DEFAULT_CONFIG = {
-    "Shortcuts": DEFAULT_SHORTCUTS,
     "Host": "",
-    "DarkMode": True,
-    "Mica": False,
-    "VolumeDb": False,
+    "Window": {
+        "DarkMode": True,
+        "Mica": False,
+        "FontName": "",
+        "FontSize": None,
+        "RememberPlacement": True,
+    },
+    "Tray": {
+        "Enabled": False,
+        "CloseToTray": False,
+    },
     "GlobalDefaultVolume": "",
     "StartupDefaultVolume": False,
+    "VolumeDb": False,
     "VolumeDbAtZero": -97.0,
     "VolumeDbStepSize": 0.5,
+    "Shortcuts": DEFAULT_SHORTCUTS,
     "GlobalShortcuts": {"VolumeUp": [], "VolumeDown": [], "Mute": []},
-    "DiagnosticsEnabled": False,
-    "SortByName": False,
-    "DropdownAnimationWorkaround": sys.platform == "win32",
     "Inputs": {},
-    "SystemTray": False,
-    "CloseToTray": False,
+    "SortByName": False,
+    "DiagnosticsEnabled": False,
+    "DropdownAnimationWorkaround": sys.platform == "win32",
 }
 
 
 BOOLEAN_CONFIG_KEYS = (
-    "DiagnosticsEnabled", "SortByName", "DarkMode", "Mica",
-    "SystemTray", "CloseToTray", "VolumeDb", "DropdownAnimationWorkaround", "StartupDefaultVolume",
+    "DiagnosticsEnabled", "SortByName", "DropdownAnimationWorkaround",
+    "VolumeDb", "StartupDefaultVolume",
 )
+
+# Settings groups name the subject their members share: the window and the tray. A group
+# holds plain values and never another group; a feature object such as GlobalShortcuts is
+# one behaviour with its own parameters and keeps its own validation, as do the configured
+# Inputs. Inside a group a member is named for its value alone, without repeating the
+# group. The names and rules of the shared groups match Sony Remote exactly.
+GROUP_MEMBERS = {
+    "Window": ("DarkMode", "Mica", "FontName", "FontSize", "RememberPlacement"),
+    "Tray": ("Enabled", "CloseToTray"),
+}
+
+# FontName and FontSize carry their own rules, matching how the same values were
+# validated before; every other group member follows the boolean rule.
+GROUP_BOOLEANS = {name: tuple(key for key in members
+                              if type(DEFAULT_CONFIG[name][key]) is bool)
+                  for name, members in GROUP_MEMBERS.items()}
+
+# Built-in text sizes. An explicit Window.FontSize replaces the UI size and the volume
+# display follows it proportionally, never closer than two points above the base.
+UI_FONT_PT = 9
+VOLUME_FONT_PT = 13
+FONT_SIZE_RANGE = (6, 24)
+
+
+def _font_sizes(size):
+    """Effective (UI, volume display) point sizes for a requested base size."""
+    base = UI_FONT_PT if size is None else size
+    display = max(base + 2, (base * VOLUME_FONT_PT * 2 + UI_FONT_PT) // (UI_FONT_PT * 2))
+    return base, display
 
 
 class ConfigError(ValueError):
     pass
 
 
-def _require_bool(config, key, default):
+def _require_bool(config, key, default, label=None):
     value = config.get(key, default)
 
     if not isinstance(value, bool):
         raise ConfigError(
-            f'"{key}" must be true or false.'
+            f'"{label or key}" must be true or false.'
         )
 
     return value
@@ -806,8 +846,9 @@ def _binding_label(text):
 
 class MouseShortcuts:
     """Local Qt mouse gestures, sharing the remote's existing action dispatch."""
-    def __init__(self, window, bindings, dispatch):
+    def __init__(self, window, bindings, dispatch, *, wheel_dispatch=None):
         self.window, self.bindings, self.dispatch = window, bindings, dispatch
+        self.wheel_dispatch = wheel_dispatch
         self.pressed = set()
         self.remainders = {"x": 0, "y": 0}
 
@@ -829,7 +870,9 @@ class MouseShortcuts:
                 return True
             return False
         window = self.window
-        eligible = (not window._shutting_down and window.isActiveWindow()
+        hovered_wheel = (kind == QEvent.Wheel and self.wheel_dispatch is not None
+                         and window.rect().contains(window.mapFromGlobal(event.globalPosition().toPoint())))
+        eligible = (not window._shutting_down and (window.isActiveWindow() or hovered_wheel)
                     and window.isVisible() and not window.isMinimized() and window.isEnabled()
                     and QApplication.activePopupWidget() is None
                     and QApplication.activeModalWidget() is None
@@ -874,7 +917,9 @@ class MouseShortcuts:
         steps = abs(total) // 120
         handled = False
         for _ in range(steps):
-            if not self.dispatch(command):
+            # Only the wheel may use the focus-optional dispatch; mouse buttons
+            # and every action guard stay on the ordinary focused path.
+            if not (self.wheel_dispatch or self.dispatch)(command):
                 self.remainders[axis] = 0
                 if handled:
                     event.accept()
@@ -997,17 +1042,21 @@ def _add_missing_settings(config, defaults=None):
     return changed
 
 
+def _check_known_keys(values, name, members):
+    """An object setting must be a mapping holding only the fields this application knows."""
+    if not isinstance(values, dict):
+        raise ConfigError(f'"{name}" must be an object with ' + ", ".join(members) + ".")
+    unknown = set(values) - set(members)
+    if unknown:
+        raise ConfigError(f'Unknown "{name}" setting(s): ' + ", ".join(sorted(unknown)) + ".")
+
+
 def validate_config(raw_config, *, allow_incomplete=False):
     if not isinstance(raw_config, dict):
         raise ConfigError(
             "The configuration root must be a JSON object."
         )
 
-    # Retired toggle is removed when the file is next saved; bindings are authoritative.
-    raw_config = dict(raw_config)
-    legacy_global = raw_config.pop("GlobalVolumeHotkeys", None)
-    if "GlobalShortcuts" not in raw_config and legacy_global is True:
-        raw_config["GlobalShortcuts"] = copy.deepcopy(DEFAULT_SHORTCUTS)
     unknown = set(raw_config) - set(DEFAULT_CONFIG)
     if unknown:
         raise ConfigError("Unknown configuration setting(s): " + ", ".join(sorted(unknown)) + ".")
@@ -1027,8 +1076,14 @@ def validate_config(raw_config, *, allow_incomplete=False):
         native_owners.add(native)
 
     config["Host"] = _validate_host(config["Host"])
+    for name, members in GROUP_MEMBERS.items():
+        _check_known_keys(config[name], name, members)
     for key in BOOLEAN_CONFIG_KEYS:
         config[key] = _require_bool(config, key, DEFAULT_CONFIG[key])
+    for name, members in GROUP_BOOLEANS.items():
+        for key in members:
+            config[name][key] = _require_bool(config[name], key, DEFAULT_CONFIG[name][key],
+                                              label=f"{name}.{key}")
 
     for key in ("VolumeDbAtZero", "VolumeDbStepSize"):
         if config["VolumeDb"] and key not in raw_config:
@@ -1037,11 +1092,23 @@ def validate_config(raw_config, *, allow_incomplete=False):
     if config["VolumeDbStepSize"] <= 0:
         raise ConfigError('"VolumeDbStepSize" must be greater than 0.')
 
-    if config["CloseToTray"] and not config["SystemTray"]:
+    if config["Tray"]["CloseToTray"] and not config["Tray"]["Enabled"]:
         raise ConfigError(
-            '"CloseToTray" can only be true when '
-            '"SystemTray" is also true.'
+            '"Tray.CloseToTray" can only be true when '
+            '"Tray.Enabled" is also true.'
         )
+
+    window = config["Window"]
+    if not isinstance(window["FontName"], str) or len(window["FontName"]) > 128:
+        raise ConfigError('"Window.FontName" must be a font family name, or empty for the default font.')
+    window["FontName"] = window["FontName"].strip()
+    if any(ord(character) < 32 for character in window["FontName"]):
+        raise ConfigError('"Window.FontName" must not contain control characters.')
+    low, high = FONT_SIZE_RANGE
+    if window["FontSize"] is not None and (type(window["FontSize"]) is not int
+                                           or not low <= window["FontSize"] <= high):
+        raise ConfigError(
+            f'"Window.FontSize" must be an integer between {low} and {high}, or null for the default sizes.')
 
     config["Inputs"] = _validate_entries(config.get("Inputs", {}), "Inputs")
     config["GlobalDefaultVolume"] = _validate_default_volume(config["GlobalDefaultVolume"], "GlobalDefaultVolume")
@@ -1084,14 +1151,7 @@ def load_config():
 
     config = validate_config(raw_config, allow_incomplete=True)
     updated = copy.deepcopy(raw_config)
-    # Retiring an old setting is a migration, separate from filling defaults.
-    retired_global = "GlobalVolumeHotkeys" in updated
-    if retired_global:
-        if "GlobalShortcuts" not in updated:
-            updated["GlobalShortcuts"] = copy.deepcopy(config["GlobalShortcuts"])
-        updated.pop("GlobalVolumeHotkeys")
     changed = _add_missing_settings(updated)
-    changed = changed or retired_global
     # Discovered entry fields remain the responsibility of their own validators.
     if any(field not in item for item in raw_config.get("Inputs", {}).values()
            for field in ("Removed", "DefaultVolume")):
@@ -2315,7 +2375,11 @@ class Worker(QRunnable):
 
 
 class WindowDrag(QObject):
-    """Start native moves only for actual drags, preserving ordinary releases."""
+    """Start native moves only for actual drags, preserving ordinary releases.
+
+    A filter parents itself to the widget it watches, so it lives exactly as long
+    as that widget and needs no reference held elsewhere.
+    """
     def __init__(self, widget):
         super().__init__(widget)
         self._origin = None
@@ -2783,7 +2847,9 @@ class YamahaRemote(QWidget):
         super().__init__()
         self.config = config
         self._shortcut_bindings = _compile_shortcuts(config)
-        self._mouse_shortcuts = MouseShortcuts(self, _compile_mouse_shortcuts(config), self._accept_mouse_shortcut)
+        self._mouse_shortcuts = MouseShortcuts(
+            self, _compile_mouse_shortcuts(config), self._accept_mouse_shortcut,
+            wheel_dispatch=lambda command: self._accept_mouse_shortcut(command, require_focus=False))
         self._global_bindings = _compile_shortcuts(config, "GlobalShortcuts")
         self._global_native_bindings = {}
         for code, command in self._global_bindings.items():
@@ -2796,7 +2862,7 @@ class YamahaRemote(QWidget):
         self._status_sequence = 0
         self.calibration_server = None
         self.activation_server = None
-        self.mica_enabled = bool(config["Mica"] and supports_mica())
+        self.mica_enabled = bool(config["Window"]["Mica"] and supports_mica())
         self.api = YamahaApi(config["Host"], config)
         self.pool = QThreadPool(self)
         # Keep receiver requests serialized, including status refreshes.
@@ -2808,6 +2874,7 @@ class YamahaRemote(QWidget):
         self.initialized = False
         self.tray = None
         self._really_close = False
+        self._placement_position = None
         self._shutting_down = False
         self._shutdown_complete = False
         self._invalid_config_digest = None
@@ -2849,7 +2916,8 @@ class YamahaRemote(QWidget):
         self._native_volume_hook = None
 
         self._build_ui()
-        self._window_drags = (WindowDrag(self), WindowDrag(self.volume_value))
+        WindowDrag(self)
+        WindowDrag(self.volume_value)
         self._apply_style()
         self._fit_and_lock_window()
         self._setup_timers()
@@ -3030,15 +3098,16 @@ class YamahaRemote(QWidget):
         self.volume_value = QLabel("—", self)
         self.volume_value.setObjectName("volumeValue")
         self.volume_value.setAlignment(Qt.AlignCenter)
+        ui_font_pt, volume_font_pt = _font_sizes(self.config["Window"]["FontSize"])
         volume_font = self.volume_value.font()
-        volume_font.setPointSizeF(13)
+        volume_font.setPointSizeF(volume_font_pt)
         volume_font.setWeight(QFont.DemiBold)
         self.volume_value.setFont(volume_font)
         self.volume_down = self._new_button("−")
         self.volume_up = self._new_button("+")
         for button, direction in ((self.volume_down, -1), (self.volume_up, 1)):
             font = button.font()
-            font.setPointSizeF(9)
+            font.setPointSizeF(ui_font_pt)
             button.setFont(font)
             button.setToolTip(_shortcut_tip(self.config, "volume_down" if direction < 0 else "volume_up"))
             button.setAutoRepeat(True)
@@ -3140,7 +3209,7 @@ class YamahaRemote(QWidget):
         section_fill = ""
         mica_controls = ""
         if self.mica_enabled:
-            dark = self.config["DarkMode"]
+            dark = self.config["Window"]["DarkMode"]
             surface = "rgba(38,38,38,185)" if dark else "rgba(255,255,255,190)"
             section_border = "rgba(120,120,120,110)" if dark else "rgba(0,0,0,25)"
             section_fill = f"background: {surface}; border-color: {section_border};"
@@ -3177,9 +3246,10 @@ class YamahaRemote(QWidget):
                     border: 1px solid rgb({menu_border});
                 }}
             """
+        ui_font_pt, volume_font_pt = _font_sizes(self.config["Window"]["FontSize"])
         self.setStyleSheet("""
             ROOT_SELECTOR { background: BACKGROUND; }
-            QWidget { font-size: 9pt; }
+            QWidget { font-size: UI_FONT_PTpt; }
             QFrame#section {
                 border: 1px solid palette(mid);
                 border-radius: 8px;
@@ -3188,9 +3258,10 @@ class YamahaRemote(QWidget):
             QPushButton, QComboBox { padding: 5px 7px; }
             QLabel { background: transparent; }
             QLabel#sectionTitle { font-weight: 600; }
-            QLabel#volumeValue { font-size: 13pt; font-weight: 600; }
+            QLabel#volumeValue { font-size: VOLUME_FONT_PTpt; font-weight: 600; }
             MICA_CONTROLS
-        """.replace("ROOT_SELECTOR", "QWidget#remoteRoot").replace("BACKGROUND", background).replace("SECTION_FILL", section_fill).replace("MICA_CONTROLS", mica_controls))
+        """.replace("ROOT_SELECTOR", "QWidget#remoteRoot").replace("BACKGROUND", background).replace("SECTION_FILL", section_fill).replace("MICA_CONTROLS", mica_controls)
+            .replace("UI_FONT_PT", str(ui_font_pt)).replace("VOLUME_FONT_PT", str(volume_font_pt)))
 
     # ----------------------------
     # Background work
@@ -3658,8 +3729,8 @@ class YamahaRemote(QWidget):
             self.set_controls_enabled(False)
             return
 
-        # Power and input controls remain available in standby. Selecting an
-        # input is an intentional wake-and-switch action.
+        # Only the power control remains available in standby: it is how the
+        # amplifier is woken. Selecting an input requires a running amplifier.
         for widget in self.control_widgets:
             widget.setEnabled(True)
 
@@ -3670,6 +3741,9 @@ class YamahaRemote(QWidget):
         self.volume_up.setEnabled(power_on)
         self.speaker_combo.setEnabled(power_on and bool(self._speaker_outputs)
                                       and self._speaker_state is not None)
+        self.input_combo.setEnabled(power_on)
+        for button in self.favorite_buttons.values():
+            button.setEnabled(power_on)
 
     def handle_request_error(self, error, *, background=False, hint=None, command=False):
         record_unexpected_exception(
@@ -4021,13 +4095,17 @@ class YamahaRemote(QWidget):
             self._hotkey_ready.emit()
         return True
 
-    def _accept_mouse_shortcut(self, command):
-        return not self.calibration_active and self._accept_focused_hotkey(command)
+    def _accept_mouse_shortcut(self, command, *, require_focus=True):
+        return not self.calibration_active and self._accept_focused_hotkey(
+            command, require_focus=require_focus)
 
-    def _accept_focused_hotkey(self, command):
+    def _accept_focused_hotkey(self, command, *, require_focus=True):
         if self.calibration_active:
             return command in _VOLUME_KEYS.values()
-        if (command not in _VOLUME_KEYS.values() or not self.isActiveWindow()
+        # A hovered wheel event is the only action allowed without focus; every
+        # device, availability, popup and modal guard below still applies.
+        if (command not in _VOLUME_KEYS.values()
+                or (require_focus and not self.isActiveWindow())
                 or QApplication.activeModalWidget() is not None
                 or QApplication.activePopupWidget() is not None
                 or not self._volume_hotkeys_eligible()):
@@ -4310,7 +4388,7 @@ class YamahaRemote(QWidget):
         return True
 
     def _setup_tray(self):
-        if not self.config["SystemTray"] or not QSystemTrayIcon.isSystemTrayAvailable():
+        if not self.config["Tray"]["Enabled"] or not QSystemTrayIcon.isSystemTrayAvailable():
             return
 
         self.tray = QSystemTrayIcon(
@@ -4413,6 +4491,7 @@ class YamahaRemote(QWidget):
         self._pause_background_work()
         self._shutdown_complete = True
         self._really_close = True
+        save_window_position(self)
         QApplication.instance().removeEventFilter(self)
         if self._native_volume_hook is not None:
             self._native_volume_hook.stop()
@@ -4434,6 +4513,11 @@ class YamahaRemote(QWidget):
         self._publish_hotkey_state()
         self._update_polling_state(refresh=True)
 
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        # Only a real placement is recorded; the file is written on shutdown alone.
+        self._placement_position = event.pos()
+
     def hideEvent(self, event):
         super().hideEvent(event)
         self._publish_hotkey_state()
@@ -4454,7 +4538,7 @@ class YamahaRemote(QWidget):
             )
 
     def closeEvent(self, event):
-        if (self.config["CloseToTray"] and not self._really_close and self.tray is not None
+        if (self.config["Tray"]["CloseToTray"] and not self._really_close and self.tray is not None
                 and QSystemTrayIcon.isSystemTrayAvailable()):
             event.ignore()
             self.hide()
@@ -4462,6 +4546,95 @@ class YamahaRemote(QWidget):
         self._shutdown()
         event.accept()
         QApplication.quit()
+
+# ----------------------------
+# Window placement
+# ----------------------------
+
+WINDOW_STATE_FORMAT_VERSION = 1
+WINDOW_STATE_LIMIT = 1_000_000
+
+
+def window_state_path():
+    """Runtime placement beside the settings file, never part of the settings themselves."""
+    return CONFIG_PATH.with_name(CONFIG_PATH.stem + ".window.json")
+
+
+def _window_state_document():
+    try:
+        document = json.loads(window_state_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(document, dict) or document.get("format_version") != WINDOW_STATE_FORMAT_VERSION:
+        return {}
+    return document
+
+
+def _window_position(values):
+    """A stored top-left position, or None when it is unset or unusable."""
+    if not isinstance(values, dict):
+        return None
+    coordinates = (values.get("X"), values.get("Y"))
+    if any(type(value) is not int or abs(value) > WINDOW_STATE_LIMIT for value in coordinates):
+        return None
+    return coordinates
+
+
+def read_window_placement(config):
+    """A stored position: a manual override first, then the remembered placement."""
+    document = _window_state_document()
+    position = _window_position(document.get("Manual"))
+    if position is not None:
+        return position
+    if config["Window"]["RememberPlacement"]:
+        return _window_position(document.get("Auto"))
+    return None
+
+
+def save_window_position(window):
+    """Write the last real window position once, on shutdown; a manual value is kept."""
+    position = window._placement_position
+    if position is None:
+        return
+    manual = _window_position(_window_state_document().get("Manual"))
+    document = {
+        "format_version": WINDOW_STATE_FORMAT_VERSION,
+        "Auto": {"X": position.x(), "Y": position.y()},
+        "Manual": {"X": None, "Y": None} if manual is None else dict(zip(("X", "Y"), manual)),
+    }
+    path = window_state_path()
+    temp_path = path.with_name(path.name + ".tmp")
+    try:
+        temp_path.write_bytes((json.dumps(document, indent=2, ensure_ascii=False) + "\n").encode("utf-8"))
+        os.replace(temp_path, path)
+    except OSError as error:
+        # Placement is disposable; a failed save must not affect shutdown.
+        record_exception(error, "Window position save", deduplicate=True)
+    finally:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _position_within_screens(x, y, size):
+    """Move a stored position onto the reachable desktop, keeping valid multi-monitor offsets."""
+    screens = QGuiApplication.screens()
+    if not screens:
+        return None
+    candidate = QRect(x, y, max(size.width(), 1), max(size.height(), 1))
+    target, overlap = None, 0
+    for screen in screens:
+        area = screen.availableGeometry().intersected(candidate)
+        covered = area.width() * area.height() if area.isValid() else 0
+        if covered > overlap:
+            target, overlap = screen.availableGeometry(), covered
+    if target is None:
+        target = screens[0].availableGeometry()
+    left_limit = max(target.left(), target.right() - candidate.width() + 1)
+    top_limit = max(target.top(), target.bottom() - candidate.height() + 1)
+    return min(max(x, target.left()), left_limit), min(max(y, target.top()), top_limit)
+
 
 # ----------------------------
 # Application entry points
@@ -4486,7 +4659,13 @@ def show_startup_window(window, config):
             window.restoreGeometry(QByteArray(bytes.fromhex(geometry)))
         except ValueError:
             pass
-    tray_available = (config["SystemTray"] and config["CloseToTray"]
+    else:
+        placement = read_window_placement(config)
+        if placement is not None:
+            target = _position_within_screens(*placement, window.size())
+            if target is not None:
+                window.move(*target)
+    tray_available = (config["Tray"]["Enabled"] and config["Tray"]["CloseToTray"]
                       and window.tray is not None and QSystemTrayIcon.isSystemTrayAvailable())
     if tray_available and (state == "tray" or
                            (state is None and "--start-in-tray" in sys.argv[1:])):
@@ -4525,7 +4704,27 @@ def check_qt_theme_support():
 def configure_app_theme(config):
     # Qt 6.8+ forwards this override to supported platform theme backends.
     QApplication.styleHints().setColorScheme(
-        Qt.ColorScheme.Dark if config["DarkMode"] else Qt.ColorScheme.Light)
+        Qt.ColorScheme.Dark if config["Window"]["DarkMode"] else Qt.ColorScheme.Light)
+
+
+def configure_app_font(config):
+    """Apply an optional font override; an unavailable family is reported and skipped."""
+    name, size = config["Window"]["FontName"], config["Window"]["FontSize"]
+    if name and not QFontDatabase.hasFamily(name):
+        QMessageBox.warning(
+            None, APP_NAME,
+            f"Font '{name}' is not available on this system.\n\n"
+            'The remote keeps its default font. Set "FontName" in the "Window" settings '
+            'back to "" or to a font that is installed here.')
+        name = ""
+    if not name and size is None:
+        return  # Both defaults: leave Qt's own application font untouched.
+    font = QApplication.font()
+    if name:
+        font.setFamily(name)
+    if size is not None:
+        font.setPointSizeF(size)
+    QApplication.setFont(font)
 
 
 def _run_application():
@@ -4570,6 +4769,7 @@ def _run_application():
         return 1
 
     configure_app_theme(config)
+    configure_app_font(config)
     configure_diagnostics(config)
     try:
         window = YamahaRemote(config)

@@ -20,6 +20,32 @@ class ConfigurationTests(unittest.TestCase):
                 with self.subTest(key=key, invalid=invalid):
                     with self.assertRaises(REMOTE["ConfigError"]):
                         REMOTE["validate_config"]({key: invalid}, allow_incomplete=True)
+        for name, members in REMOTE["GROUP_BOOLEANS"].items():
+            for key in members:
+                for invalid in (0, 1, "true", None):
+                    with self.subTest(group=name, key=key, invalid=invalid):
+                        with self.assertRaises(REMOTE["ConfigError"]):
+                            REMOTE["validate_config"]({name: {key: invalid}}, allow_incomplete=True)
+
+    def test_settings_groups_match_the_defaults_and_hold_plain_values(self):
+        for name, members in REMOTE["GROUP_MEMBERS"].items():
+            defaults = REMOTE["DEFAULT_CONFIG"][name]
+            self.assertEqual(set(members), set(defaults), f"{name} members must match its defaults")
+            for key, value in defaults.items():
+                self.assertNotIsInstance(value, dict, f"{name}.{key} must not be another group")
+        self.assertEqual({name: {key for key in members
+                                 if type(REMOTE["DEFAULT_CONFIG"][name][key]) is bool}
+                          for name, members in REMOTE["GROUP_MEMBERS"].items()},
+                         {name: set(keys) for name, keys in REMOTE["GROUP_BOOLEANS"].items()})
+
+    def test_unknown_groups_and_group_members_are_rejected(self):
+        for name in REMOTE["GROUP_MEMBERS"]:
+            for value in (None, "text", [], 5):
+                with self.subTest(group=name, value=value):
+                    with self.assertRaisesRegex(REMOTE["ConfigError"], f'"{name}" must be an object'):
+                        REMOTE["validate_config"]({name: value}, allow_incomplete=True)
+            with self.assertRaisesRegex(REMOTE["ConfigError"], rf'Unknown "{name}" setting\(s\)'):
+                REMOTE["validate_config"]({name: {"NoSuchSetting": True}}, allow_incomplete=True)
 
     def test_unknown_settings_and_missing_host_are_rejected(self):
         with self.assertRaisesRegex(REMOTE["ConfigError"], "Unknown configuration"):
@@ -68,7 +94,7 @@ class ConfigurationTests(unittest.TestCase):
                     REMOTE['validate_config'](document, allow_incomplete=True)
 
     def test_tray_dependency_and_ip_validation_unchanged(self):
-        for document in ({"CloseToTray": True, "SystemTray": False},
+        for document in ({"Tray": {"Enabled": False, "CloseToTray": True}},
                          {"Host": "192.168.1.1000"}, {"Host": "300.1.1.1"}):
             with self.subTest(document=document):
                 with self.assertRaises(REMOTE["ConfigError"]):
